@@ -148,3 +148,43 @@ requires running in an initialized workspace. Resolving an *imported*
 project's submanifests (e.g. zephyr's) further requires that project's
 clone to be checked out at its pin. Otherwise, submanifest dependencies
 remain unpinned until a `west update` + `pin-west pin` cycle locks them.
+
+## GitHub Action
+
+The repository includes a Dependabot-like action for automated manifest
+maintenance. It runs `pin-west bump` and opens a pull request when anything
+changed. To set up a scheduled workflow to the manifest repository, add
+`.github/workflows/bump-west.yml` with the following content:
+
+```yaml
+name: West updates
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Mondays 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the bump branch
+  pull-requests: write # open the pull request
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: urob/pin-west@main
+        with:
+          scope: minor # optional: latest (default), minor, or patch
+```
+
+The action automatically detects `west.yml`. Use `manifest: path/to/manifest.yml`
+to overwrite the detection. Use `scope` to narrow the update scope, `token` to 
+overwrite the default workflow token, and `pr-branch` and `pr-title` to control
+the pull request (`pr-branch` is force-pushed, so repeated runs update a single
+open PR).
+
+Note that pull requests created with the default workflow token don't trigger
+other workflows; pass a PAT or a GitHub App token as `token` if CI should run
+on the bump PRs.
+

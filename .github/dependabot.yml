@@ -1,8 +1,9 @@
 version: 2
 
 updates:
+  # "/" covers .github/workflows plus the composite action.yml at the root
   - package-ecosystem: "github-actions"
-    directory: ".github/workflows"
+    directory: "/"
     schedule:
       interval: "monthly"
     cooldown:
