@@ -1,6 +1,6 @@
 # pin-west
 
-[![PyPI](https://img.shields.io/pypi/v/pin-west)](https://pypi.org/project/pin-west/)
+[![PyPI](https://img.shields.io/pypi/v/pin-west.svg)](https://pypi.org/project/pin-west/)
 
 Pin and update revisions in [west
 manifests](https://docs.zephyrproject.org/latest/develop/west/manifest.html) to
