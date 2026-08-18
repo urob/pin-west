@@ -211,7 +211,7 @@ def _workspace_topdir(manifest_path: Path) -> str | None:
         return None
     if path is None:
         return None
-    configured = Path(topdir, path, config.get("manifest.file", "west.yml"))
+    configured = Path(topdir, path, config.get("manifest.file") or "west.yml")
     return topdir if configured.resolve() == manifest_path.resolve() else None
 
 

@@ -159,7 +159,7 @@ def _find_manifest(arg: Path | None) -> Path:
             f"west workspace at {topdir} has no manifest.path configured; "
             "use -f/--manifest"
         )
-    manifest = Path(topdir) / path / config.get("manifest.file", "west.yml")
+    manifest = Path(topdir) / path / (config.get("manifest.file") or "west.yml")
     print(f"using workspace manifest: {manifest}")
     return manifest
 
@@ -356,6 +356,7 @@ def cmd_bump(args) -> int:
         if track.kind in ("branch", "other", "untracked") and args.releases_only:
             print(f"skip {p.name}: not release-tracked ({track.kind})")
         elif track.kind == "branch":
+            assert track.ref is not None  # classification invariant
             if scope:
                 print(
                     f"warning: --{scope} ignored for branch-tracked '{p.name}'; "
@@ -364,6 +365,7 @@ def cmd_bump(args) -> int:
                 )
             _apply(mf, p.name, track.ref, refs.branches[track.ref], "branch")
         elif track.kind == "floating":
+            assert track.ref is not None and track.version is not None
             if scope == "patch" and len(track.version.release) < 2:
                 print(
                     f"warning: {p.name}: '{track.ref}' floats at the major level; "

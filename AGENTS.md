@@ -5,8 +5,9 @@ Zephyr/ZMK's west). Python 3.13, uv-managed. README.md documents the CLI.
 
 ## Commands
 
-- `uv run pytest -q` — full test suite (offline, ~2s)
-- `uvx ruff check` and `uvx ruff format` — must both be clean before finishing
+- `uv run pytest -q` — full test suite (offline, ~10s)
+- `uvx ruff check`, `uvx ruff format`, `uv run ty check` — all must be clean
+  before finishing
 - `uv run pin-west <pin|bump|check> ...` — run the tool
 
 ## Architecture (src/pin_west/)

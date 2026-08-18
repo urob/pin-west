@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeGuard
 
 _FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 _KEY_LINE = re.compile(r"^(\s*)(- )?([A-Za-z0-9_-]+):(.*)$")
@@ -25,7 +26,7 @@ class ManifestError(Exception):
     pass
 
 
-def is_pinned(revision: str | None) -> bool:
+def is_pinned(revision: str | None) -> TypeGuard[str]:
     """True if revision is a full commit sha (SHA-1 or SHA-256)."""
     return bool(revision and _FULL_SHA.match(revision))
 
@@ -145,7 +146,7 @@ def _parse_blocks(
         if m := _PROJECTS.match(line):
             proj_row, proj_indent = i, len(m.group(1))
             break
-    if proj_row is None:
+    if proj_row is None or proj_indent is None:
         raise ManifestError("no 'projects:' section found")
 
     # Collect the start row of each list item directly under 'projects:'.
@@ -182,9 +183,12 @@ def _parse_blocks(
             begin = i
         elif line.strip() == GENERATED_END:
             end = i
-    if (begin is None) != (end is None) or (begin is not None and end < begin):
+    if begin is None and end is None:
+        gen_range = None
+    elif begin is None or end is None or end < begin:
         raise ManifestError("malformed pin-west managed-imports section markers")
-    gen_range = (begin, end) if begin is not None else None
+    else:
+        gen_range = (begin, end)
     if item_indent is None:
         item_indent = proj_indent + 2
     return blocks, end_row, item_indent, gen_range
@@ -209,7 +213,7 @@ def _parse_item(lines: list[str], start: int, stop: int) -> ProjectBlock:
             name, name_row, name_comment = value, i, cmt
         elif key == "revision":
             revision_row, revision, comment = i, value, cmt
-    if name is None:
+    if name is None or name_row is None or key_col is None:
         raise ManifestError(f"project item at line {start + 1} has no 'name' key")
     return ProjectBlock(
         name=name,

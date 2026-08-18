@@ -56,7 +56,8 @@ class TestLsRemote:
         head = repo.commit("on main")
         resolved = res.resolve_ref(repo.url, "main")
         assert resolved == res.Resolved(head, "branch", False)
-        assert res.resolve_ref(repo.url, "dev").sha != head
+        dev = res.resolve_ref(repo.url, "dev")
+        assert dev is not None and dev.sha != head
 
     def test_resolve_lightweight_tag(self, remote):
         repo = remote()
@@ -68,6 +69,7 @@ class TestLsRemote:
         repo = remote()
         repo.tag("v1.0.0", annotated=True)
         resolved = res.resolve_ref(repo.url, "v1.0.0")
+        assert resolved is not None
         assert resolved.sha == repo.sha()  # commit sha, not the tag object's
         assert resolved.kind == "tag"
 

@@ -70,7 +70,6 @@ def remote(tmp_path):
     def make(name: str = "proj") -> GitRemote:
         return GitRemote(tmp_path / "remotes" / name)
 
-    make.base = tmp_path / "remotes"
     return make
 
 

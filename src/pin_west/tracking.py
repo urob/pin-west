@@ -126,8 +126,9 @@ def _infer(revision: str | None, refs: RemoteRefs) -> Track:
         matching = {
             t: v for t, v in parsed_tags(refs.tags).items() if refs.tags[t] == revision
         }
-        if matching:
-            return _track_for_name(best_tag(matching), refs, "tag-match")
+        best = best_tag(matching)
+        if best is not None and (track := _track_for_name(best, refs, "tag-match")):
+            return track
         for tag, sha in refs.tags.items():
             if sha == revision:  # matches only version-unparseable tags
                 return Track("other", tag, via="tag-match")
