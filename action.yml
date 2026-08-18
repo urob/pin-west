@@ -1,0 +1,126 @@
+name: pin-west bump
+description: >-
+  Update west manifests and open a pull request with the changes.
+
+inputs:
+  scope:
+    description: >-
+      Narrows the update scope: "latest" (default, no restriction),
+      "minor" (stay within the same major), or "patch" (stay within the
+      same major.minor).
+    default: latest
+  manifest:
+    description: >-
+      Manifest file to operate on. By default, the action detects and uses
+      west.yml if a unique candidate is found.
+    default: ""
+  token:
+    description: >-
+      Token used for GitHub API resolution and for pushing the branch and
+      opening the pull request. Note that pull requests created with the
+      default workflow token do not trigger CI workflows; pass a PAT or a
+      GitHub App token if you need CI to run on them.
+    default: ${{ github.token }}
+  pr-branch:
+    description: Head branch the changes are pushed to (force-pushed, reused across runs).
+    default: pin-west/bump
+  pr-title:
+    description: Title for the pull request and the commit message.
+    default: Bump west manifest pins
+
+outputs:
+  updated:
+    description: Whether the bump changed anything ("true"/"false").
+    value: ${{ steps.pr.outputs.updated }}
+  pull-request-url:
+    description: URL of the opened or updated pull request (empty when nothing changed).
+    value: ${{ steps.pr.outputs.pull-request-url }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
+    - name: Check for updates
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SCOPE: ${{ inputs.scope }}
+        MANIFEST: ${{ inputs.manifest }}
+      run: |
+        args=()
+        case "$SCOPE" in
+          latest) ;;
+          minor) args+=(--minor) ;;
+          patch) args+=(--patch) ;;
+          *)
+            echo "invalid scope '$SCOPE' (expected latest, minor, or patch)" >&2
+            exit 1
+            ;;
+        esac
+        # A CI checkout is never an initialized west workspace, so pin-west's
+        # workspace fallback can't apply here; find the manifest ourselves.
+        if [ -z "$MANIFEST" ] && [ ! -f west.yml ]; then
+          mapfile -t found < <(git ls-files | grep -E '(^|/)west\.yml$' || true)
+          if [ "${#found[@]}" -eq 1 ]; then
+            MANIFEST="${found[0]}"
+            echo "using manifest: $MANIFEST"
+          else
+            {
+              if [ "${#found[@]}" -eq 0 ]; then
+                echo "no west.yml found in the repository;"
+              else
+                echo "multiple west.yml candidates found:"
+                printf '  %s\n' "${found[@]}"
+              fi
+              echo "set the 'manifest' input to the manifest to operate on"
+            } >&2
+            exit 1
+          fi
+        fi
+        if [ -n "$MANIFEST" ]; then
+          args+=(--manifest "$MANIFEST")
+        fi
+        uvx pin-west bump "${args[@]}" | tee "$RUNNER_TEMP/pin-west-bump.log"
+
+    - name: Open or update pull request
+      id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        BRANCH: ${{ inputs.pr-branch }}
+        TITLE: ${{ inputs.pr-title }}
+      run: |
+        if git diff --quiet; then
+          echo "updated=false" >> "$GITHUB_OUTPUT"
+          echo "pull-request-url=" >> "$GITHUB_OUTPUT"
+          echo "No changes to commit."
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add -u
+        git commit -m "$TITLE"
+        git push --force origin "HEAD:refs/heads/$BRANCH"
+
+        body="$RUNNER_TEMP/pin-west-pr-body.md"
+        {
+          echo "Automated bump by [pin-west](https://github.com/urob/pin-west)."
+          echo
+          echo '```'
+          cat "$RUNNER_TEMP/pin-west-bump.log"
+          echo '```'
+        } > "$body"
+
+        url="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"
+        if [ -n "$url" ]; then
+          gh pr edit "$url" --title "$TITLE" --body-file "$body"
+          echo "Updated $url"
+        else
+          url="$(gh pr create --head "$BRANCH" --base "$GITHUB_REF_NAME" \
+            --title "$TITLE" --body-file "$body")"
+          echo "Opened $url"
+        fi
+        echo "updated=true" >> "$GITHUB_OUTPUT"
+        echo "pull-request-url=$url" >> "$GITHUB_OUTPUT"
