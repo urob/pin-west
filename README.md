@@ -22,6 +22,18 @@ With a few noted exceptions, `pin-west` needs neither an
 initialized west workspace nor any clones. It ever only edits `revision` fields, 
 keeping all other formatting and comments byte-for-byte.
 
+## Install
+
+With [Nix](https://nixos.org), run it without installing:
+
+```sh
+nix run github:urob/pin-west -- check
+```
+
+The flake also exposes `packages.default` (add it to a profile or a system
+`environment.systemPackages`), an `overlays.default` providing `pin-west`, and a
+`devShells.default` with Python and `uv` for hacking on the tool itself.
+
 ## Usage
 
 By default, pin-west runs on `./west.yml` if it exists, or otherwise

@@ -9,6 +9,9 @@ Zephyr/ZMK's west). Python 3.13, uv-managed. README.md documents the CLI.
 - `uvx ruff check`, `uvx ruff format`, `uv run ty check` — all must be clean
   before finishing
 - `uv run pin-west <pin|bump|check> ...` — run the tool
+- `nix build .#pin-west -L` — flake build; runs the same suite in the sandbox
+  (`flake.nix` + `package.nix`; nixpkgs ships an older `uv_build` than
+  `pyproject.toml` pins, so `package.nix` relaxes that bound in `postPatch`)
 
 ## Architecture (src/pin_west/)
 
