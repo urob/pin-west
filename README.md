@@ -24,12 +24,11 @@ With a few noted exceptions, `pin-west` needs neither an
 initialized west workspace nor any clones. It ever only edits `revision` fields, 
 keeping all other formatting and comments byte-for-byte.
 
-## Install
+## Setup
 
 **uv/pip**
 
-pin-west is on [PyPI](https://pypi.org/project/pin-west/). With
-[uv](https://docs.astral.sh/uv/), run it without installing:
+With [uv](https://docs.astral.sh/uv/), run it without installing:
 
 ```sh
 uvx pin-west check
