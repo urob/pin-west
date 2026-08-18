@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # reused as the release gate, see release.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # The suite builds real local git repos as stand-in remotes. conftest
+      # sets a per-repo identity, but git still wants a default branch name.
+      - name: Configure git
+        run: git config --global init.defaultBranch main
+
+      - name: Check the lockfile is up to date
+        run: uv lock --check
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Lint
+        run: uvx ruff check
+
+      - name: Format
+        run: uvx ruff format --check
+
+      - name: Types
+        run: uv run ty check
+
+  nix:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: Flake build
+        run: nix build .#pin-west -L

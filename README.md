@@ -1,5 +1,7 @@
 # pin-west
 
+[![PyPI](https://img.shields.io/pypi/v/pin-west)](https://pypi.org/project/pin-west/)
+
 Pin and update revisions in [west
 manifests](https://docs.zephyrproject.org/latest/develop/west/manifest.html) to
 exact commit SHAs.
@@ -24,15 +26,31 @@ keeping all other formatting and comments byte-for-byte.
 
 ## Install
 
+**uv/pip**
+
+pin-west is on [PyPI](https://pypi.org/project/pin-west/). With
+[uv](https://docs.astral.sh/uv/), run it without installing:
+
+```sh
+uvx pin-west check
+```
+
+Or install it persistently:
+
+```sh
+uv tool install pin-west   # or: pipx install pin-west
+```
+
+**nix**
+
 With [Nix](https://nixos.org), run it without installing:
 
 ```sh
 nix run github:urob/pin-west -- check
 ```
 
-The flake also exposes `packages.default` (add it to a profile or a system
-`environment.systemPackages`), an `overlays.default` providing `pin-west`, and a
-`devShells.default` with Python and `uv` for hacking on the tool itself.
+The flake also exposes `packages` and `overlays` defaults providing `pin-west`, and a `devShell`
+with Python and `uv` for development.
 
 ## Usage
 

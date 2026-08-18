@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib.metadata
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -24,6 +25,11 @@ from . import imports, tracking
 from . import resolve as res
 from .manifest import ManifestError, ManifestFile, comment_ref, is_pinned
 
+try:
+    __version__ = importlib.metadata.version("pin-west")
+except importlib.metadata.PackageNotFoundError:  # source tree, not installed
+    __version__ = "0.0.0+unknown"
+
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
@@ -39,6 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="pin-west",
         description="Pin revisions in west manifests to exact commit SHAs.",
     )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add(

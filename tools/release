@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Cut a release: bump the version, commit, tag, and push. The tag push
+# triggers .github/workflows/release.yml, which tests, builds, and publishes
+# to PyPI.
+#
+# Usage: tools/release [BUMP]   BUMP is any `uv version --bump` value
+#                               (patch, minor, major, rc, ...); default patch.
+
+set -euo pipefail
+
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
+
+cd "$(dirname "$0")/.."
+
+bump=${1:-patch}
+
+# `git commit -a` below would sweep up any unrelated change lying around.
+[ -z "$(git status --porcelain)" ] || die "working tree is dirty"
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+[ "$branch" = main ] || die "on '$branch', expected main"
+
+# --dry-run so nothing is written until every check has passed.
+tag="v$(uv version --bump "$bump" --dry-run --short)"
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    die "tag $tag already exists"
+fi
+
+# CI gates the publish anyway, but failing here costs no tag to clean up.
+uv run pytest -q
+
+uv version --bump "$bump" --no-sync
+git commit -qam "Release $tag"
+git tag -a "$tag" -m "$tag"
+
+echo
+git --no-pager show --stat HEAD
+echo
+read -rp "Push $tag and publish it to PyPI? [y/N] " reply
+case $reply in
+    y | Y)
+        git push --follow-tags
+        echo "pushed $tag — watch it at $(git remote get-url origin | sed 's/\.git$//')/actions"
+        ;;
+    *)
+        git tag -d "$tag" >/dev/null
+        git reset -q --hard HEAD~1
+        die "aborted, version bump rolled back"
+        ;;
+esac

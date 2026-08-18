@@ -22,6 +22,13 @@ def project_manifest(repo, revision: str | None = "main", defaults: str = "") ->
     )
 
 
+def test_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith("pin-west ")
+
+
 class TestPin:
     def test_pin_branch(self, remote, write_manifest):
         repo = remote()

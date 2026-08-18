@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # publishes to TestPyPI only, for rehearsals
+
+# Job-level blocks below override this; a called workflow can only ever
+# narrow what the caller grants, so `ci` needs contents:read here.
+permissions:
+  contents: read
+
+jobs:
+  # Never publish something that hasn't gone green.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # package.nix reads the version out of pyproject.toml, so a tag that
+      # disagrees with it would ship two different versions of "0.1.0".
+      - name: Check the tag matches project.version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(uv version --short)"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag v$tag does not match pyproject version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/pin-west
+    permissions:
+      id-token: write # trusted publishing; no API token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pin-west
+    permissions:
+      id-token: write # trusted publishing; no API token needed
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

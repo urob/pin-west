@@ -8,6 +8,16 @@ license-files = ["LICENSE"]
 authors = [
     { name = "urob", email = "978080+urob@users.noreply.github.com" }
 ]
+keywords = ["west", "zephyr", "zmk", "manifest", "pin", "lockfile"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: Software Development :: Version Control :: Git",
+]
 requires-python = ">=3.13"
 dependencies = [
     "west>=1.2",
@@ -17,7 +27,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/urob/pin-west"
+Repository = "https://github.com/urob/pin-west"
 Issues = "https://github.com/urob/pin-west/issues"
+Changelog = "https://github.com/urob/pin-west/releases"
 
 [project.scripts]
 pin-west = "pin_west:main"
@@ -25,6 +37,11 @@ pin-west = "pin_west:main"
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Ship the suite in the sdist so downstream packagers (nixpkgs, distros) can
+# run it against the released artifact rather than a git checkout.
+source-include = ["tests/**"]
 
 [dependency-groups]
 dev = [
