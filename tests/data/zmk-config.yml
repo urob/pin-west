@@ -1,0 +1,40 @@
+# Sample manifest for a ZMK config repository.
+---
+manifest:
+  defaults:
+    remote: urob
+    revision: v0.3
+
+  remotes:
+    - name: urob
+      url-base: https://github.com/urob
+    - name: zmkfirmware
+      url-base: https://github.com/zmkfirmware
+
+  projects:
+    - name: zmk
+      remote: zmkfirmware
+      import: app/west.yml
+
+    # ZMK modules (using the default remote)
+    - name: zmk-auto-layer
+      path: modules/zmk/auto-layer
+    - name: zmk-helpers
+      path: modules/zmk/helpers
+      revision: main
+
+    - name: zephyr
+      remote: zmkfirmware
+      revision: dacab4875df72109b96cc8977547a0dc04875bcd # v3.5.0+zmk-fixes
+      clone-depth: 1
+      import:
+        name-allowlist:
+          - cmsis
+          - hal_nordic
+          - hal_rpi_pico
+          - hal_stm32
+          - mbedtls
+          - tinycrypt
+
+  self:
+    path: config

@@ -1,0 +1,27 @@
+[project]
+name = "pin-west"
+version = "0.1.0"
+description = "Pin revisions in west manifests to exact commit SHAs"
+readme = "README.md"
+authors = [
+    { name = "urob", email = "978080+urob@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "west>=1.2",
+    "packaging>=23",
+    "pyyaml>=6",
+]
+
+[project.scripts]
+pin-west = "pin_west:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+]
