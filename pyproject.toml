@@ -3,6 +3,8 @@ name = "pin-west"
 version = "0.1.0"
 description = "Pin revisions in west manifests to exact commit SHAs"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "urob", email = "978080+urob@users.noreply.github.com" }
 ]
@@ -12,6 +14,10 @@ dependencies = [
     "packaging>=23",
     "pyyaml>=6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/urob/pin-west"
+Issues = "https://github.com/urob/pin-west/issues"
 
 [project.scripts]
 pin-west = "pin_west:main"
