@@ -8,9 +8,9 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypeGuard
 
-import yaml
-from west.configuration import Configuration, MalformedConfig
+from west.configuration import MalformedConfig
 from west.manifest import (
     QUAL_MANIFEST_REV_BRANCH,
     ImportFlag,
@@ -41,7 +41,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    def add(name: str, func, help: str) -> argparse.ArgumentParser:
+    def add(
+        name: str, func, help: str, *, dry_run: bool = False, gh_token: bool = False
+    ) -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=help)
         sp.add_argument(
             "-f",
@@ -51,10 +53,24 @@ def _build_parser() -> argparse.ArgumentParser:
             help="manifest file to operate on (default: ./west.yml, else the "
             "enclosing west workspace's configured manifest)",
         )
-        sp.set_defaults(func=func)
+        if gh_token:
+            sp.add_argument(
+                "--gh-token",
+                help="GitHub token (default: $GITHUB_TOKEN, $GH_TOKEN, gh auth)",
+            )
+        if dry_run:
+            sp.add_argument(
+                "-n", "--dry-run", action="store_true", help="print a diff, don't write"
+            )
+        sp.set_defaults(func=func, dry_run=False)
         return sp
 
-    sp = add("pin", cmd_pin, "pin unpinned revisions to the current head of their ref")
+    sp = add(
+        "pin",
+        cmd_pin,
+        "pin unpinned revisions to the current head of their ref",
+        dry_run=True,
+    )
     sp.add_argument(
         "--local",
         action="store_true",
@@ -68,15 +84,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "managed section; once present, the section is kept up to date by "
         "every pin/bump run",
     )
-    sp.add_argument(
-        "-n", "--dry-run", action="store_true", help="print a diff, don't write"
-    )
 
     sp = add(
         "bump",
         cmd_bump,
         "bump projects along what they track: release-pinned to the latest "
         "release, branch/series-pinned to the tracked ref's head",
+        dry_run=True,
+        gh_token=True,
     )
     sp.add_argument("projects", nargs="*", help="projects to bump (default: all)")
     sp.add_argument("--ref", help="bump to this branch or tag explicitly")
@@ -96,18 +111,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip projects that don't track a release tag or series",
     )
-    sp.add_argument(
-        "--gh-token", help="GitHub token (default: $GITHUB_TOKEN, $GH_TOKEN, gh auth)"
-    )
-    sp.add_argument(
-        "-n", "--dry-run", action="store_true", help="print a diff, don't write"
-    )
 
     sp = add(
         "check",
         cmd_check,
         "check that revisions are pinned, shas exist, and comments are "
         "consistent (all three by default; flags select a subset)",
+        gh_token=True,
     )
     sp.add_argument(
         "--pinned",
@@ -123,9 +133,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--comments",
         action="store_true",
         help="check that pinned shas are in the history of their commented ref",
-    )
-    sp.add_argument(
-        "--gh-token", help="GitHub token (default: $GITHUB_TOKEN, $GH_TOKEN, gh auth)"
     )
 
     return ap
@@ -147,19 +154,17 @@ def _find_manifest(arg: Path | None) -> Path:
             "workspace; use -f/--manifest"
         )
     try:
-        config = Configuration(topdir=topdir)
-        path = config.get("manifest.path")
+        manifest = imports.configured_manifest(topdir)
     except MalformedConfig as e:
         raise ManifestError(
             f"west workspace at {topdir} has a broken configuration ({e}); "
             "use -f/--manifest"
         )
-    if path is None:
+    if manifest is None:
         raise ManifestError(
             f"west workspace at {topdir} has no manifest.path configured; "
             "use -f/--manifest"
         )
-    manifest = Path(topdir) / path / (config.get("manifest.file") or "west.yml")
     print(f"using workspace manifest: {manifest}")
     return manifest
 
@@ -175,8 +180,7 @@ def _load(args) -> tuple[ManifestFile, list]:
 
 
 def _has_default_revision(mf: ManifestFile) -> bool:
-    data = yaml.safe_load(mf.text())
-    return "revision" in (data.get("manifest", {}).get("defaults") or {})
+    return "revision" in (imports.manifest_data(mf.text()).get("defaults") or {})
 
 
 def _finish(mf: ManifestFile, original: str, args, errors: list[str]) -> int:
@@ -185,7 +189,7 @@ def _finish(mf: ManifestFile, original: str, args, errors: list[str]) -> int:
     new = mf.text()
     if new == original:
         print("nothing to do")
-    elif getattr(args, "dry_run", False):
+    elif args.dry_run:
         sys.stdout.writelines(
             difflib.unified_diff(
                 original.splitlines(keepends=True),
@@ -203,6 +207,28 @@ def _finish(mf: ManifestFile, original: str, args, errors: list[str]) -> int:
 def _comment_for(ref: str, kind: str) -> str:
     today = datetime.now(UTC).date().isoformat()
     return ref if kind == "tag" else f"{ref} ({today})"
+
+
+def _resolution_ok(
+    resolved: res.Resolved | None, name: str, url: str, ref: str, errors: list[str]
+) -> TypeGuard[res.Resolved]:
+    """Report an unresolved or ambiguous ref; True when resolved is usable."""
+    if resolved is None:
+        errors.append(f"{name}: ref '{ref}' not found on {url}")
+        return False
+    if resolved.ambiguous:
+        print(f"warning: {name}: '{ref}' is both a branch and a tag; using the tag")
+    return True
+
+
+def _regenerate_imports(
+    mf: ManifestFile, errors: list[str], scope: set[str] | None = None
+) -> ManifestFile:
+    try:
+        return imports.regenerate(mf, errors, scope=scope)
+    except (ManifestError, res.ResolveError) as e:
+        errors.append(str(e))
+        return mf
 
 
 def cmd_pin(args) -> int:
@@ -233,28 +259,22 @@ def cmd_pin(args) -> int:
             resolved is None
             and ref == "master"
             and not has_default
-            and (branch := res.default_branch(p.url))
+            and (default := res.default_branch(p.url))
         ):
+            branch = default[0]
             print(
                 f"note: {p.name}: no revision given and no 'master' branch; "
                 f"using default branch '{branch}'"
             )
+            # resolve by name: a same-named tag must win, matching git/west
             ref, resolved = branch, res.resolve_ref(p.url, branch)
-        if resolved is None:
-            errors.append(f"{p.name}: ref '{ref}' not found on {p.url}")
+        if not _resolution_ok(resolved, p.name, p.url, ref, errors):
             continue
-        if resolved.ambiguous:
-            print(
-                f"warning: {p.name}: '{ref}' is both a branch and a tag; using the tag"
-            )
         mf.set_revision(p.name, resolved.sha, _comment_for(ref, resolved.kind))
         print(f"pin {p.name}: {ref} -> {resolved.sha[:12]} ({resolved.kind})")
 
     if args.include_imports or mf.has_generated_section:
-        try:
-            mf = imports.regenerate(mf, errors)
-        except (ManifestError, res.ResolveError) as e:
-            errors.append(str(e))
+        mf = _regenerate_imports(mf, errors)
     return _finish(mf, original, args, errors)
 
 
@@ -309,13 +329,11 @@ def cmd_bump(args) -> int:
         if (not selected or p.name in selected) and p.name not in mf.generated
     ]
 
-    token = res.find_token(args.gh_token)
-    if (
-        token is None
-        and args.ref is None
-        and scope is None
-        and any(res.github_repo(p.url) for p in targets)
-    ):
+    # only GitHub-remote targets without --ref can reach the GitHub API;
+    # don't spend a `gh auth token` run otherwise
+    has_github = any(res.github_repo(p.url) for p in targets)
+    token = res.find_token(args.gh_token) if has_github and not args.ref else None
+    if token is None and args.ref is None and scope is None and has_github:
         print(
             "warning: no GitHub token found (--gh-token, $GITHUB_TOKEN, or `gh auth login`); "
             "unauthenticated API requests are rate-limited to 60/hour",
@@ -334,15 +352,8 @@ def cmd_bump(args) -> int:
         try:
             if args.ref:
                 resolved = res.resolve_ref(p.url, args.ref)
-                if resolved is None:
-                    errors.append(f"{p.name}: ref '{args.ref}' not found on {p.url}")
-                    continue
-                if resolved.ambiguous:
-                    print(
-                        f"warning: {p.name}: '{args.ref}' is both a branch and a "
-                        "tag; using the tag"
-                    )
-                _apply(mf, p.name, args.ref, resolved.sha, resolved.kind)
+                if _resolution_ok(resolved, p.name, p.url, args.ref, errors):
+                    _apply(mf, p.name, args.ref, resolved.sha, resolved.kind)
                 continue
             refs = res.remote_refs(p.url)
         except res.ResolveError as e:
@@ -373,7 +384,7 @@ def cmd_bump(args) -> int:
                 )
             _apply(mf, p.name, track.ref, refs.tags[track.ref], "tag")
         elif track.kind == "release":
-            _bump_release(mf, p, block, track, refs, scope, token)
+            _bump_release(mf, p, track, refs, scope, token)
         else:  # "other" / "untracked": today's fallback chain
             if scope:
                 print(
@@ -385,16 +396,12 @@ def cmd_bump(args) -> int:
             except res.ResolveError as e:
                 errors.append(str(e))
                 continue
-            if resolved is None:
-                errors.append(f"{p.name}: ref '{ref}' not found on {p.url}")
+            if not _resolution_ok(resolved, p.name, p.url, ref, errors):
                 continue
             _apply(mf, p.name, ref, resolved.sha, resolved.kind)
 
     if mf.has_generated_section:
-        try:
-            mf = imports.regenerate(mf, errors, scope=selected or None)
-        except (ManifestError, res.ResolveError) as e:
-            errors.append(str(e))
+        mf = _regenerate_imports(mf, errors, scope=selected or None)
     return _finish(mf, original, args, errors)
 
 
@@ -408,7 +415,8 @@ def _apply(mf: ManifestFile, name: str, ref: str, sha: str, kind: str) -> None:
     print(f"bump {name}: {old} -> {sha[:12]} ({kind} {ref})")
 
 
-def _bump_release(mf, p, block, track, refs, scope, token) -> None:
+def _bump_release(mf, p, track, refs, scope, token) -> None:
+    block = mf.blocks[p.name]
     # Moved-tag guard: an exact release tag declared by the comment should
     # still point at the pinned commit — release tags aren't supposed to move.
     moved = (
@@ -423,28 +431,26 @@ def _bump_release(mf, p, block, track, refs, scope, token) -> None:
             f"re-pin explicitly with --ref {track.ref} if this is expected"
         )
 
-    parsed = tracking.parsed_tags(refs.tags)
-    target = None
+    release = version = None
     if scope is None and (gh := res.github_repo(p.url)):
         release = res.latest_release(*gh, token)
         version = tracking.parse_tag(release)
-        if version is not None:
-            if version < track.version:
-                print(
-                    f"skip {p.name}: latest release '{release}' is older than the "
-                    f"pinned {track.ref}; use --ref to downgrade"
-                )
-                return
-            if version > track.version:
-                target = release
-            # equal: up to date per the release marking
-        else:
-            target = tracking.best_tag(
-                tracking.release_candidates(track.version, parsed, scope)
+    if version is not None:  # the GitHub release marking wins over a tag scan
+        target = None
+        if version < track.version:
+            print(
+                f"skip {p.name}: latest release '{release}' is older than the "
+                f"pinned {track.ref}; use --ref to downgrade"
             )
+            return
+        if version > track.version:
+            target = release
+        # equal: up to date per the release marking
     else:
         target = tracking.best_tag(
-            tracking.release_candidates(track.version, parsed, scope)
+            tracking.release_candidates(
+                track.version, tracking.parsed_tags(refs.tags), scope
+            )
         )
 
     if target is not None:
@@ -470,22 +476,28 @@ def _latest_target(
         if tag in refs.tags:
             return tag, res.Resolved(refs.tags[tag], "tag")
         return tag, res.resolve_ref(url, tag)
-    if tag := res.highest_version_tag(refs.tags):
+    if tag := tracking.highest_version_tag(refs.tags):
         return tag, res.Resolved(refs.tags[tag], "tag")
-    branch = res.default_branch(url)
-    if branch is None or branch not in refs.branches:
+    default = res.default_branch(url)
+    if default is None:
         raise res.ResolveError(
             f"{url}: no releases, version tags, or default branch found"
         )
-    return branch, res.Resolved(refs.branches[branch], "branch")
+    branch, sha = default
+    return branch, res.Resolved(sha, "branch")
 
 
 def cmd_check(args) -> int:
-    selected = {c for c in ("pinned", "shas", "comments") if getattr(args, c)}
-    checks = selected or {"pinned", "shas", "comments"}
+    flags = {"pinned": args.pinned, "shas": args.shas, "comments": args.comments}
+    selected = {name for name, on in flags.items() if on}
+    checks = selected or set(flags)
     mf, projects = _load(args)
     needs_network = checks & {"shas", "comments"}
-    token = res.find_token(args.gh_token) if needs_network else None
+    token = (
+        res.find_token(args.gh_token)
+        if needs_network and any(res.github_repo(p.url) for p in projects)
+        else None
+    )
 
     failures = 0
     for p in projects:
@@ -497,24 +509,27 @@ def cmd_check(args) -> int:
                 print(f"skip {p.name}: not pinned (revision: {p.revision})")
             continue
 
-        problem = None
-        notes = []
-        if "shas" in checks and not res.commit_exists(p.url, p.revision, token):
-            problem = f"commit {p.revision[:12]} not found on {p.url}"
-        elif "comments" in checks:
+        ref = refs = None
+        if "comments" in checks:
             ref = comment_ref(mf.blocks[p.name].comment)
             if ref and is_pinned(ref):
                 ref = None  # comment repeats a sha; nothing to cross-check
             if ref:
-                problem, note = _check_comment(p, ref, token)
-                if note:
-                    notes.append(note)
+                try:
+                    refs = res.remote_refs(p.url)
+                except res.ResolveError:
+                    refs = None  # reported as unverifiable by _check_comment
+        problem = note = None
+        if "shas" in checks and not res.commit_exists(p.url, p.revision, token, refs):
+            problem = f"commit {p.revision[:12]} not found on {p.url}"
+        elif ref:
+            problem, note = _check_comment(p, ref, refs, token)
 
         if problem:
             print(f"FAIL {p.name}: {problem}")
             failures += 1
         else:
-            detail = f" ({', '.join(notes)})" if notes else ""
+            detail = f" ({note})" if note else ""
             print(f"ok   {p.name}: {p.revision[:12]}{detail}")
 
     if failures:
@@ -524,14 +539,14 @@ def cmd_check(args) -> int:
     return 0
 
 
-def _check_comment(p, ref: str, token: str | None) -> tuple[str | None, str | None]:
+def _check_comment(
+    p, ref: str, refs: res.RemoteRefs | None, token: str | None
+) -> tuple[str | None, str | None]:
     """Verify a pinned project against its commented ref. The claim depends
     on the ref's type: exact tag -> identity, floating series alias ->
     membership in the series, branch -> ancestry (GitHub only, best-effort).
     Returns (problem, note); at most one is set."""
-    try:
-        refs = res.remote_refs(p.url)
-    except res.ResolveError:
+    if refs is None:
         return None, f"'{ref}' not verifiable"
     if ref in refs.tags:  # tag wins over a same-named branch, matching git/west
         ver = tracking.parse_tag(ref)
@@ -540,9 +555,8 @@ def _check_comment(p, ref: str, token: str | None) -> tuple[str | None, str | No
             series = {
                 refs.tags[t]
                 for t, v in parsed.items()
-                if v.release[: len(ver.release)] == ver.release
+                if tracking.same_series(v, ver.release)
             }
-            series.add(refs.tags[ref])
             if p.revision in series:
                 return None, f"in the '{ref}' series"
             return f"{p.revision[:12]} is not in the '{ref}' series", None
@@ -553,6 +567,8 @@ def _check_comment(p, ref: str, token: str | None) -> tuple[str | None, str | No
             None,
         )
     if ref in refs.branches:
+        if refs.branches[ref] == p.revision:
+            return None, f"on '{ref}'"
         on_ref = res.sha_on_ref(p.url, p.revision, ref, token)
         if on_ref is False:
             return f"{p.revision[:12]} is not in the history of '{ref}'", None

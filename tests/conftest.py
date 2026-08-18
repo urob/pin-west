@@ -53,11 +53,13 @@ class GitRemote:
     def branch(self, name: str) -> None:
         self.git("branch", name)
 
-    def tag(self, name: str, annotated: bool = False) -> None:
+    def tag(self, name: str, annotated: bool = False, force: bool = False) -> None:
+        args = ["tag"]
         if annotated:
-            self.git("tag", "-a", "-m", name, name)
-        else:
-            self.git("tag", name)
+            args += ["-a", "-m", name]
+        if force:
+            args.append("-f")
+        self.git(*args, name)
 
     def sha(self, rev: str = "HEAD") -> str:
         return self.git("rev-parse", f"{rev}^{{commit}}")
@@ -69,6 +71,29 @@ def remote(tmp_path):
 
     def make(name: str = "proj") -> GitRemote:
         return GitRemote(tmp_path / "remotes" / name)
+
+    return make
+
+
+@pytest.fixture
+def west_workspace(tmp_path):
+    """Factory for a real west workspace at tmp_path/'ws', initialized from a
+    (dedented) manifest written to ws/config/west.yml. Requires west on PATH."""
+
+    def make(manifest_text: str, extra_files=(), update: bool = False) -> Path:
+        ws = tmp_path / "ws"
+        config = ws / "config"
+        config.mkdir(parents=True)
+        (config / "west.yml").write_text(dedent(manifest_text))
+        for name, content in extra_files:
+            (config / name).write_text(content)
+        subprocess.run(["git", "init", "-q"], cwd=config, check=True)
+        subprocess.run(
+            ["west", "init", "-l", "config"], cwd=ws, check=True, capture_output=True
+        )
+        if update:
+            subprocess.run(["west", "update"], cwd=ws, check=True, capture_output=True)
+        return ws
 
     return make
 

@@ -42,16 +42,39 @@ class _ImportInfo:
     declared: dict[str, str | None] = field(default_factory=dict)
     resolved: dict[tuple[str, str], str | None] = field(default_factory=dict)
 
+    def resolve_once(self, url: str, revision: str) -> str | None:
+        """Resolve a branch/tag to a sha exactly once per (url, ref) and cache
+        it, so the imported-manifest fetch and the pin describe the same
+        snapshot even if the ref moves mid-run."""
+        key = (url, revision)
+        if key not in self.resolved:
+            resolved = res.resolve_ref(url, revision)
+            self.resolved[key] = resolved.sha if resolved else None
+        return self.resolved[key]
 
-def _resolve_once(info: _ImportInfo, url: str, revision: str) -> str | None:
-    """Resolve a branch/tag to a sha exactly once per (url, ref) and cache it,
-    so the imported-manifest fetch and the pin describe the same snapshot even
-    if the ref moves mid-run."""
-    key = (url, revision)
-    if key not in info.resolved:
-        resolved = res.resolve_ref(url, revision)
-        info.resolved[key] = resolved.sha if resolved else None
-    return info.resolved[key]
+
+# The '# via <importer> (<path>)' comment on managed entries is load-bearing:
+# it is parsed back to scope selective bumps. Keep every encode/decode here.
+def _provenance(importer_name: str, path: str) -> str:
+    return f"{importer_name} ({path})"
+
+
+def _provenance_importer(provenance: str) -> str:
+    return provenance.split(" (", 1)[0]
+
+
+def _via_comment(provenance: str) -> str:
+    return f"via {provenance}"
+
+
+def manifest_data(text: str) -> dict:
+    """The 'manifest:' mapping of a YAML document; {} when absent or invalid."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    manifest = data.get("manifest") if isinstance(data, dict) else None
+    return manifest if isinstance(manifest, dict) else {}
 
 
 def regenerate(
@@ -86,7 +109,7 @@ def regenerate(
             if held is not None:
                 revision = held
             else:
-                sha = _resolve_once(info, p.url, revision)
+                sha = info.resolve_once(p.url, revision)
                 if sha is None:
                     errors.append(
                         f"{p.name}: imported ref '{revision}' not found on {p.url}"
@@ -115,7 +138,7 @@ def _held_revision(
     if scope is None or name not in old:
         return None
     old_revision, old_name_comment = old[name]
-    if provenance is None or old_name_comment != f"via {provenance}":
+    if provenance is None or old_name_comment != _via_comment(provenance):
         return None  # winning declarer changed (or unrecorded): re-resolve
     if not is_pinned(old_revision):
         return None
@@ -133,7 +156,7 @@ def _root_importer(name: str, info: _ImportInfo, direct: set[str]) -> str | None
         provenance = info.provenance.get(name)
         if provenance is None:
             return None
-        importer = provenance.split(" (", 1)[0]
+        importer = _provenance_importer(provenance)
         if importer in direct:
             return importer
         if importer in seen:
@@ -143,9 +166,8 @@ def _root_importer(name: str, info: _ImportInfo, direct: set[str]) -> str | None
 
 
 def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
-    data = yaml.safe_load(text) or {}
     topdir = _workspace_topdir(manifest_path)
-    if ((data.get("manifest") or {}).get("self") or {}).get("import") and not topdir:
+    if (manifest_data(text).get("self") or {}).get("import") and not topdir:
         raise ManifestError(
             "top-level 'self: import:' requires an initialized west workspace; "
             "run inside one to resolve imports"
@@ -157,7 +179,7 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
         declared = str(project.revision)
         revision = declared
         if not is_pinned(revision):
-            sha = _resolve_once(info, project.url, revision)
+            sha = info.resolve_once(project.url, revision)
             if sha is None:
                 raise res.ResolveError(f"cannot resolve '{revision}' on {project.url}")
             revision = sha
@@ -173,14 +195,15 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
             raise res.ResolveError(
                 f"cannot fetch '{path}' from {project.url} at {revision}"
             )
-        _record(info, project.name, path, content)
+        manifest = manifest_data(content)
+        _record(info, project.name, path, manifest)
         if topdir and project.is_cloned() and _checkout_matches(project, revision):
             # west resolves this manifest's own 'self: import:' (if any) from
             # the project's working tree; only allow that when the checkout
             # is at the revision we're importing at, so the lock can never
             # mix content from two revisions of the same project
             return content
-        return _strip_self_import(content, project.name, path)
+        return _strip_self_import(content, manifest, project.name, path)
 
     try:
         if topdir:
@@ -196,8 +219,18 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
 def _checkout_matches(project, revision: str) -> bool:
     """True when the project's working tree is checked out at revision, so
     west's filesystem reads of its self-imports match the pinned content."""
-    p = res._git("rev-parse", "HEAD^{commit}", cwd=project.abspath)
+    p = res.git("rev-parse", "HEAD^{commit}", cwd=project.abspath)
     return p.returncode == 0 and p.stdout.strip() == revision
+
+
+def configured_manifest(topdir: str) -> Path | None:
+    """Path of the workspace's configured manifest, None if unconfigured.
+    Raises MalformedConfig on a broken configuration."""
+    config = Configuration(topdir=topdir)
+    path = config.get("manifest.path")
+    if path is None:
+        return None
+    return Path(topdir, path, config.get("manifest.file") or "west.yml")
 
 
 def _workspace_topdir(manifest_path: Path) -> str | None:
@@ -205,13 +238,11 @@ def _workspace_topdir(manifest_path: Path) -> str | None:
     or None (also when the manifest is some other file)."""
     try:
         topdir = west_topdir(start=manifest_path.resolve().parent)
-        config = Configuration(topdir=topdir)
-        path = config.get("manifest.path")
+        configured = configured_manifest(topdir)
     except (WestNotFound, MalformedConfig):
         return None
-    if path is None:
+    if configured is None:
         return None
-    configured = Path(topdir, path, config.get("manifest.file") or "west.yml")
     return topdir if configured.resolve() == manifest_path.resolve() else None
 
 
@@ -235,17 +266,14 @@ def _from_workspace(text: str, manifest_path: Path, importer) -> Manifest:
         tmp.unlink(missing_ok=True)
 
 
-def _strip_self_import(content: str, project_name: str, path: str) -> str:
+def _strip_self_import(
+    content: str, manifest: dict, project_name: str, path: str
+) -> str:
     """West can only resolve an imported manifest's own 'self: import:' (e.g.
     zephyr's 'import: submanifests') from a clone of the project. Without
     one, dropping it is safe: our section only adds pinned overrides, so any
     projects it would define simply stay resolved by west at update time —
     unpinned, as before."""
-    try:
-        data = yaml.safe_load(content) or {}
-    except yaml.YAMLError:
-        return content
-    manifest = data.get("manifest") or {}
     self_section = manifest.get("self") or {}
     if "import" not in self_section:
         return content
@@ -255,30 +283,25 @@ def _strip_self_import(content: str, project_name: str, path: str) -> str:
         "out at the pinned revision; any projects it defines are left "
         "unpinned (run `west update`, then re-run pin)"
     )
+    # rebuild rather than mutate: `manifest` is the shared parse _record read
     self_section = {k: v for k, v in self_section.items() if k != "import"}
+    manifest = {k: v for k, v in manifest.items() if k != "self"}
     if self_section:
         manifest["self"] = self_section
-    else:
-        manifest.pop("self", None)
-    return yaml.safe_dump(data)
+    return yaml.safe_dump({"manifest": manifest})
 
 
-def _record(info: _ImportInfo, importer_name: str, path: str, content: str) -> None:
-    try:
-        data = yaml.safe_load(content) or {}
-    except yaml.YAMLError:
-        return
-    manifest = data.get("manifest") or {}
+def _record(info: _ImportInfo, importer_name: str, path: str, manifest: dict) -> None:
     default_rev = (manifest.get("defaults") or {}).get("revision")
     for proj in manifest.get("projects") or []:
         if isinstance(proj, dict) and (name := proj.get("name")):
-            info.provenance.setdefault(name, f"{importer_name} ({path})")
+            info.provenance.setdefault(name, _provenance(importer_name, path))
             info.declared.setdefault(name, proj.get("revision", default_rev))
 
 
 def _render_entry(p, revision: str, provenance: str | None, indent: str) -> list[str]:
     key = indent + "  "
-    via = f" # via {provenance}" if provenance else ""
+    via = f" # {_via_comment(provenance)}" if provenance else ""
     lines = [f"{indent}- name: {p.name}{via}"]
     lines.append(f"{key}url: {p.url}")
     lines.append(f"{key}revision: {revision}")

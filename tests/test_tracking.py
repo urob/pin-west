@@ -4,6 +4,7 @@ from pin_west.resolve import RemoteRefs
 from pin_west.tracking import (
     best_tag,
     classify,
+    highest_version_tag,
     is_floating,
     parse_tag,
     parsed_tags,
@@ -115,3 +116,25 @@ class TestCandidates:
 
     def test_best_tag_prefers_specific_on_tie(self):
         assert best_tag(parsed_tags({"v0.3": "x", "v0.3.0": "x"})) == "v0.3.0"
+
+
+class TestHighestVersionTag:
+    def test_orders_versions(self):
+        tags = {"v0.9.0": "x", "v0.10.0": "x", "v0.2.0": "x"}
+        assert highest_version_tag(tags) == "v0.10.0"
+
+    def test_prefers_stable_over_prerelease(self):
+        tags = {"v1.0.0": "x", "v2.0.0rc1": "x"}
+        assert highest_version_tag(tags) == "v1.0.0"
+
+    def test_all_prereleases(self):
+        tags = {"v1.0.0rc1": "x", "v1.0.0rc2": "x"}
+        assert highest_version_tag(tags) == "v1.0.0rc2"
+
+    def test_ignores_unparseable(self):
+        tags = {"nightly": "x", "v1.0": "x"}
+        assert highest_version_tag(tags) == "v1.0"
+
+    def test_no_version_tags(self):
+        assert highest_version_tag({"nightly": "x"}) is None
+        assert highest_version_tag({}) is None

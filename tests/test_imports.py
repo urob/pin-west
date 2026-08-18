@@ -137,17 +137,7 @@ class TestIncludeImports:
         capsys.readouterr()
 
         # upstream: parent drops child, adds child2
-        parent.commit_file(
-            "sub/west.yml",
-            dedent(f"""\
-                manifest:
-                  projects:
-                    - name: child2
-                      url: {child2.url}
-                      revision: main
-            """),
-            "swap deps",
-        )
+        parent.commit_file("sub/west.yml", dep_manifest(child2, "child2"), "swap deps")
         assert main(["bump", "parent", "-f", str(path)]) == 0
         out = capsys.readouterr().out
         text = path.read_text()
@@ -238,14 +228,7 @@ class TestIncludeImports:
         parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
         grandchild = remote("grandchild")
         child.commit_file(
-            "sub2/west.yml",
-            dedent(f"""\
-                manifest:
-                  projects:
-                    - name: grandchild
-                      url: {grandchild.url}
-                      revision: {grandchild.sha()}
-            """),
+            "sub2/west.yml", dep_manifest(grandchild, "grandchild", grandchild.sha())
         )
         head_before_push = child.sha()
         parent.commit_file(
@@ -304,26 +287,11 @@ class TestIncludeImports:
 
 @pytest.mark.skipif(shutil.which("west") is None, reason="west CLI not on PATH")
 class TestWorkspaceSelfImports:
-    @staticmethod
-    def make_workspace(tmp_path, manifest_text, extra_files=()):
-        ws = tmp_path / "ws"
-        config = ws / "config"
-        config.mkdir(parents=True)
-        (config / "west.yml").write_text(manifest_text)
-        for name, content in extra_files:
-            (config / name).write_text(content)
-        subprocess.run(["git", "init", "-q"], cwd=config, check=True)
-        subprocess.run(
-            ["west", "init", "-l", "config"], cwd=ws, check=True, capture_output=True
-        )
-        return ws
-
-    def test_top_level_self_import(self, remote, tmp_path, monkeypatch, capsys):
+    def test_top_level_self_import(self, remote, west_workspace, monkeypatch):
         child, direct = remote("child"), remote("direct")
         head = child.commit("child head")
-        ws = self.make_workspace(
-            tmp_path,
-            dedent(f"""\
+        ws = west_workspace(
+            f"""\
                 manifest:
                   projects:
                     - name: direct
@@ -332,7 +300,7 @@ class TestWorkspaceSelfImports:
                   self:
                     path: config
                     import: extra.yml
-            """),
+            """,
             extra_files=[("extra.yml", dep_manifest(child, "dep"))],
         )
         monkeypatch.chdir(ws)
@@ -342,7 +310,7 @@ class TestWorkspaceSelfImports:
         assert f"revision: {head}\n" in text
 
     def test_imported_manifest_self_import_resolves_from_clone(
-        self, remote, tmp_path, monkeypatch, capsys
+        self, remote, west_workspace, monkeypatch, capsys
     ):
         # zephyr-style: parent's manifest self-imports another file from the
         # parent repo; with parent cloned, west reads it and dep2 gets pinned
@@ -357,20 +325,19 @@ class TestWorkspaceSelfImports:
             "    import: extras/more.yml\n",
             "add manifest",
         )
-        ws = self.make_workspace(
-            tmp_path,
-            dedent(f"""\
-                manifest:
-                  projects:
-                    - name: parent
-                      url: {parent.url}
-                      revision: main
-                      import: sub/west.yml
-                  self:
-                    path: config
-            """),
+        ws = west_workspace(
+            f"""\
+            manifest:
+              projects:
+                - name: parent
+                  url: {parent.url}
+                  revision: main
+                  import: sub/west.yml
+              self:
+                path: config
+        """,
+            update=True,
         )
-        subprocess.run(["west", "update"], cwd=ws, check=True, capture_output=True)
         monkeypatch.chdir(ws)
         assert main(["pin", "--include-imports"]) == 0
         out = capsys.readouterr().out
@@ -380,7 +347,7 @@ class TestWorkspaceSelfImports:
         assert f"revision: {head2}\n" in text
 
     def test_bump_past_clone_never_mixes_snapshots(
-        self, remote, tmp_path, monkeypatch, capsys
+        self, remote, west_workspace, monkeypatch, capsys
     ):
         # bump moves parent beyond the clone's checkout: its self-imported
         # projects must be dropped loudly (not held from old content), and a
@@ -394,20 +361,19 @@ class TestWorkspaceSelfImports:
             "manifest:\n  projects: []\n  self:\n    path: parent\n"
             "    import: extras/more.yml\n",
         )
-        ws = self.make_workspace(
-            tmp_path,
-            dedent(f"""\
-                manifest:
-                  projects:
-                    - name: parent
-                      url: {parent.url}
-                      revision: main
-                      import: sub/west.yml
-                  self:
-                    path: config
-            """),
+        ws = west_workspace(
+            f"""\
+            manifest:
+              projects:
+                - name: parent
+                  url: {parent.url}
+                  revision: main
+                  import: sub/west.yml
+              self:
+                path: config
+        """,
+            update=True,
         )
-        subprocess.run(["west", "update"], cwd=ws, check=True, capture_output=True)
         monkeypatch.chdir(ws)
         assert main(["pin", "--include-imports"]) == 0
         assert "- name: dep2" in (ws / "config" / "west.yml").read_text()

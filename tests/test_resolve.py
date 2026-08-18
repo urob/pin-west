@@ -5,28 +5,6 @@ import pytest
 from pin_west import resolve as res
 
 
-class TestHighestVersionTag:
-    def test_orders_versions(self):
-        tags = {"v0.9.0": "x", "v0.10.0": "x", "v0.2.0": "x"}
-        assert res.highest_version_tag(tags) == "v0.10.0"
-
-    def test_prefers_stable_over_prerelease(self):
-        tags = {"v1.0.0": "x", "v2.0.0rc1": "x"}
-        assert res.highest_version_tag(tags) == "v1.0.0"
-
-    def test_all_prereleases(self):
-        tags = {"v1.0.0rc1": "x", "v1.0.0rc2": "x"}
-        assert res.highest_version_tag(tags) == "v1.0.0rc2"
-
-    def test_ignores_unparseable(self):
-        tags = {"nightly": "x", "v1.0": "x"}
-        assert res.highest_version_tag(tags) == "v1.0"
-
-    def test_no_version_tags(self):
-        assert res.highest_version_tag({"nightly": "x"}) is None
-        assert res.highest_version_tag({}) is None
-
-
 class TestGithubRepo:
     @pytest.mark.parametrize(
         "url",
@@ -91,15 +69,15 @@ class TestLsRemote:
 
     def test_default_branch(self, remote):
         repo = remote()
-        assert res.default_branch(repo.url) == "main"
+        assert res.default_branch(repo.url) == ("main", repo.sha())
 
-    def test_remote_tags_peels(self, remote):
+    def test_remote_refs_peels_tags(self, remote):
         repo = remote()
         first = repo.sha()
         repo.tag("light")
         repo.commit("second")
         repo.tag("annot", annotated=True)
-        tags = res.remote_tags(repo.url)
+        tags = res.remote_refs(repo.url).tags
         assert tags == {"light": first, "annot": repo.sha()}
 
 

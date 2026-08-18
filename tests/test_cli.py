@@ -2,8 +2,6 @@
 
 import re
 import shutil
-import subprocess
-from textwrap import dedent
 
 import pytest
 
@@ -62,6 +60,22 @@ class TestPin:
             rf"      revision: {repo.sha()} # main \({DATE}\)", lines[3]
         )
 
+    def test_default_branch_fallback_resolves_tag_first(
+        self, remote, write_manifest, capsys
+    ):
+        # the default branch's name is also a tag (at an older commit): the
+        # tag must win, matching git/west, so pin and check agree
+        repo = remote()
+        repo.tag("main")
+        tagged = repo.sha()
+        repo.commit("branch moved on")
+        path = write_manifest(project_manifest(repo, revision=None))
+        assert main(["pin", "-f", str(path)]) == 0
+        out = capsys.readouterr().out
+        assert "'main' is both a branch and a tag; using the tag" in out
+        assert f"revision: {tagged} # main\n" in path.read_text()
+        assert main(["check", "--gh-token", "dummy", "-f", str(path)]) == 0
+
     def test_missing_revision_uses_defaults(self, remote, write_manifest):
         repo = remote()
         repo.branch("stable")
@@ -106,8 +120,8 @@ class TestCheck:
         )
         assert main(["check", "--gh-token", "dummy", "-f", str(path)]) == 0
         out = capsys.readouterr().out
-        # local remotes aren't GitHub, so the ancestry check reports unverifiable
-        assert f"ok   proj: {repo.sha()[:12]} ('main' not verifiable)" in out
+        # the pin sits at the branch tip: verified from the refs snapshot alone
+        assert f"ok   proj: {repo.sha()[:12]} (on 'main')" in out
 
     def test_pinned_only_is_offline(self, remote, write_manifest):
         # a bogus sha passes --pinned (no network) but fails the default checks
@@ -125,11 +139,17 @@ class TestCheck:
         path = write_manifest(
             project_manifest(repo, f"{repo.sha()} # main (2026-08-17)")
         )
+        repo.commit("advance main")  # pin is no longer the tip: ancestry query
         monkeypatch.setattr(res, "sha_on_ref", lambda url, sha, ref, token: True)
         assert (
             main(["check", "--comments", "--gh-token", "dummy", "-f", str(path)]) == 0
         )
         assert "(on 'main')" in capsys.readouterr().out
+        monkeypatch.setattr(res, "sha_on_ref", lambda url, sha, ref, token: None)
+        assert (
+            main(["check", "--comments", "--gh-token", "dummy", "-f", str(path)]) == 0
+        )
+        assert "('main' not verifiable)" in capsys.readouterr().out
         monkeypatch.setattr(res, "sha_on_ref", lambda url, sha, ref, token: False)
         assert (
             main(["check", "--comments", "--gh-token", "dummy", "-f", str(path)]) == 1
@@ -156,7 +176,7 @@ class TestCheck:
         )
         assert "(at tag 'v1.0.0')" in capsys.readouterr().out
         repo.commit("rewritten")
-        repo.git("tag", "-f", "v1.0.0")
+        repo.tag("v1.0.0", force=True)
         assert (
             main(["check", "--comments", "--gh-token", "dummy", "-f", str(path)]) == 1
         )
@@ -169,7 +189,7 @@ class TestCheck:
         repo.tag("v0.3.0")
         repo.commit("newer in series")
         repo.tag("v0.3.1")
-        repo.git("tag", "-f", "v0.3")
+        repo.tag("v0.3", force=True)
         # pinned at an older series member while the alias moved on: still ok
         path = write_manifest(project_manifest(repo, f"{old} # v0.3"))
         assert (
@@ -320,7 +340,7 @@ class TestBump:
         repo.tag("v0.3.0")
         new = repo.commit("v0.3.1")
         repo.tag("v0.3.1")
-        repo.git("tag", "-f", "v0.3")  # alias moved along the series: normal
+        repo.tag("v0.3", force=True)  # alias moved along the series: normal
         path = write_manifest(project_manifest(repo, f"{old} # v0.3"))
         assert main(["bump", "-f", str(path)]) == 0
         out = capsys.readouterr().out
@@ -332,7 +352,7 @@ class TestBump:
         old = repo.sha()
         repo.tag("v0.3.0")
         repo.commit("rewritten")
-        repo.git("tag", "-f", "v0.3.0")  # exact release tag moved: suspicious
+        repo.tag("v0.3.0", force=True)  # exact release tag moved: suspicious
         path = write_manifest(project_manifest(repo, f"{old} # v0.3.0"))
         before = path.read_text()
         assert main(["bump", "-f", str(path)]) == 0
@@ -360,7 +380,7 @@ class TestBump:
         repo.tag("v0.3.0")
         new = repo.commit("newer in series")
         repo.tag("v0.3.1")
-        repo.git("tag", "-f", "v0.3")
+        repo.tag("v0.3", force=True)
         path = write_manifest(
             project_manifest(
                 repo, revision=None, defaults="  defaults:\n    revision: v0.3\n"
@@ -400,25 +420,22 @@ class TestManifestDetection:
 @pytest.mark.skipif(shutil.which("west") is None, reason="west CLI not on PATH")
 class TestLocalWorkspace:
     def test_pin_local_uses_workspace_state(
-        self, remote, tmp_path, monkeypatch, capsys
+        self, remote, west_workspace, monkeypatch, capsys
     ):
         repo = remote()
         updated = repo.commit("state at west update")
-        ws = tmp_path / "ws"
-        (ws / "config").mkdir(parents=True)
-        (ws / "config" / "west.yml").write_text(
-            dedent(f"""\
-                manifest:
-                  projects:
-                    - name: proj
-                      url: {repo.url}
-                      revision: main
-                  self:
-                    path: config
-            """)
+        ws = west_workspace(
+            f"""\
+            manifest:
+              projects:
+                - name: proj
+                  url: {repo.url}
+                  revision: main
+              self:
+                path: config
+        """,
+            update=True,
         )
-        for cmd in (["west", "init", "-l", "config"], ["west", "update"]):
-            subprocess.run(cmd, cwd=ws, check=True, capture_output=True, text=True)
         newer = repo.commit("after west update")
 
         # no -f: exercises workspace manifest detection too

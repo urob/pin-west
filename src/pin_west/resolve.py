@@ -17,8 +17,6 @@ import urllib.parse
 import urllib.request
 from typing import NamedTuple
 
-from packaging.version import InvalidVersion, Version
-
 _GITHUB_URL = re.compile(
     r"^(?:https://|http://|git@|ssh://git@)github\.com[:/]"
     r"(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
@@ -40,14 +38,20 @@ class RemoteRefs(NamedTuple):
     tags: dict[str, str]  # peeled: annotated tags map to their commit sha
 
 
-def _git(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess:
+def git(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args], capture_output=True, text=True, cwd=cwd, check=False
     )
 
 
+def _shallow_fetch(tmp: str, url: str, revision: str) -> bool:
+    """Fetch a single revision into a throwaway repo at tmp; True on success."""
+    git("init", "-q", cwd=tmp)
+    return git("fetch", "-q", "--depth=1", "--", url, revision, cwd=tmp).returncode == 0
+
+
 def ls_remote(url: str, *patterns: str) -> dict[str, str]:
-    p = _git("ls-remote", "--", url, *patterns)
+    p = git("ls-remote", "--", url, *patterns)
     if p.returncode:
         raise ResolveError(f"git ls-remote {url}: {p.stderr.strip()}")
     refs = {}
@@ -71,12 +75,14 @@ def resolve_ref(url: str, ref: str) -> Resolved | None:
     return None
 
 
-def default_branch(url: str) -> str | None:
-    p = _git("ls-remote", "--symref", "--", url, "HEAD")
+def default_branch(url: str) -> tuple[str, str] | None:
+    """The remote's default branch as (name, head sha), in one round-trip."""
+    p = git("ls-remote", "--symref", "--", url, "HEAD")
     if p.returncode:
         raise ResolveError(f"git ls-remote {url}: {p.stderr.strip()}")
-    m = re.search(r"^ref:\s+refs/heads/(\S+)\s+HEAD$", p.stdout, re.MULTILINE)
-    return m.group(1) if m else None
+    name = re.search(r"^ref:\s+refs/heads/(\S+)\s+HEAD$", p.stdout, re.MULTILINE)
+    sha = re.search(r"^([0-9a-fA-F]+)\s+HEAD$", p.stdout, re.MULTILINE)
+    return (name.group(1), sha.group(1)) if name and sha else None
 
 
 def remote_refs(url: str) -> RemoteRefs:
@@ -96,11 +102,6 @@ def remote_refs(url: str) -> RemoteRefs:
     return RemoteRefs(
         branches, {tag: peeled.get(tag, sha) for tag, sha in base.items()}
     )
-
-
-def remote_tags(url: str) -> dict[str, str]:
-    """All tags on the remote, mapped to their (peeled) commit sha."""
-    return remote_refs(url).tags
 
 
 def fetch_blob(url: str, revision: str, path: str) -> str | None:
@@ -125,25 +126,10 @@ def fetch_blob(url: str, revision: str, path: str) -> str | None:
         except urllib.error.URLError as e:
             raise ResolveError(f"{raw}: {e.reason}")
     with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
-        _git("init", "-q", cwd=tmp)
-        if _git("fetch", "-q", "--depth=1", "--", url, revision, cwd=tmp).returncode:
+        if not _shallow_fetch(tmp, url, revision):
             raise ResolveError(f"cannot fetch '{revision}' from {url}")
-        p = _git("show", f"FETCH_HEAD:{path}", cwd=tmp)
+        p = git("show", f"FETCH_HEAD:{path}", cwd=tmp)
         return p.stdout if p.returncode == 0 else None
-
-
-def highest_version_tag(tags: dict[str, str]) -> str | None:
-    """Highest version-parseable tag, preferring stable over pre-releases."""
-    candidates = []
-    for tag in tags:
-        try:
-            candidates.append((Version(tag.lstrip("vV")), tag))
-        except InvalidVersion:
-            continue
-    if not candidates:
-        return None
-    stable = [c for c in candidates if not c[0].is_prerelease]
-    return max(stable or candidates)[1]
 
 
 # --- GitHub API ---------------------------------------------------------
@@ -158,8 +144,8 @@ def find_token(cli_token: str | None) -> str | None:
     if cli_token:
         return cli_token
     for var in ("GITHUB_TOKEN", "GH_TOKEN"):
-        if os.environ.get(var):
-            return os.environ[var]
+        if token := os.environ.get(var):
+            return token
     try:
         p = subprocess.run(
             ["gh", "auth", "token"], capture_output=True, text=True, check=False
@@ -196,12 +182,20 @@ def latest_release(owner: str, repo: str, token: str | None) -> str | None:
     return data.get("tag_name") if data else None
 
 
-def commit_exists(url: str, sha: str, token: str | None) -> bool:
+def commit_exists(
+    url: str, sha: str, token: str | None, refs: RemoteRefs | None = None
+) -> bool:
+    """Whether sha exists on the remote. A RemoteRefs snapshot, if given,
+    proves existence without a round-trip when sha sits at an advertised
+    branch or (peeled) tag tip."""
+    if refs is not None and (
+        sha in refs.tags.values() or sha in refs.branches.values()
+    ):
+        return True
     if gh := github_repo(url):
         return github_api(f"/repos/{gh[0]}/{gh[1]}/commits/{sha}", token) is not None
     with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
-        _git("init", "-q", cwd=tmp)
-        return _git("fetch", "--depth=1", "--", url, sha, cwd=tmp).returncode == 0
+        return _shallow_fetch(tmp, url, sha)
 
 
 def sha_on_ref(url: str, sha: str, ref: str, token: str | None) -> bool | None:

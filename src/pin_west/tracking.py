@@ -46,6 +46,11 @@ def parsed_tags(tags: dict[str, str]) -> dict[str, Version]:
     return {t: v for t in tags if (v := parse_tag(t)) is not None}
 
 
+def same_series(v: Version, prefix: tuple[int, ...]) -> bool:
+    """Whether v's release starts with prefix (v0.3.1 is in the v0.3 series)."""
+    return v.release[: len(prefix)] == prefix
+
+
 def is_floating(ver: Version, parsed: dict[str, Version]) -> bool:
     """A short tag (v0.3, v1) is a floating series alias iff more specific
     tags exist in its series (any v0.3.x)."""
@@ -53,7 +58,7 @@ def is_floating(ver: Version, parsed: dict[str, Version]) -> bool:
     if n >= 3:
         return False
     return any(
-        len(v.release) > n and v.release[:n] == ver.release for v in parsed.values()
+        len(v.release) > n and same_series(v, ver.release) for v in parsed.values()
     )
 
 
@@ -63,6 +68,13 @@ def best_tag(candidates: dict[str, Version]) -> str | None:
     if not candidates:
         return None
     return max(candidates.items(), key=lambda kv: (kv[1], len(kv[1].release), kv[0]))[0]
+
+
+def highest_version_tag(tags: dict[str, str]) -> str | None:
+    """Highest version-parseable tag, preferring stable over pre-releases."""
+    parsed = parsed_tags(tags)
+    stable = {t: v for t, v in parsed.items() if not v.is_prerelease}
+    return best_tag(stable or parsed)
 
 
 def release_candidates(
@@ -77,7 +89,7 @@ def release_candidates(
         for t, v in parsed.items()
         if not v.is_prerelease
         and v > current
-        and (prefix is None or v.release[: len(prefix)] == prefix)
+        and (prefix is None or same_series(v, prefix))
     }
 
 
@@ -127,7 +139,9 @@ def _infer(revision: str | None, refs: RemoteRefs) -> Track:
             t: v for t, v in parsed_tags(refs.tags).items() if refs.tags[t] == revision
         }
         best = best_tag(matching)
-        if best is not None and (track := _track_for_name(best, refs, "tag-match")):
+        if best is not None:
+            track = _track_for_name(best, refs, "tag-match")
+            assert track is not None  # best is a known version tag
             return track
         for tag, sha in refs.tags.items():
             if sha == revision:  # matches only version-unparseable tags
