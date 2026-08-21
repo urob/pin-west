@@ -1,6 +1,6 @@
 [project]
 name = "pin-west"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pin revisions in west manifests to exact commit SHAs"
 readme = "README.md"
 license = "MIT"
