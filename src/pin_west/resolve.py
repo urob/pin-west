@@ -15,7 +15,9 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, NamedTuple
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import NamedTuple
 
 _GITHUB_URL = re.compile(
     r"^(?:https://|http://|git@|ssh://git@)github\.com[:/]"
@@ -48,6 +50,15 @@ def _shallow_fetch(tmp: str, url: str, revision: str) -> bool:
     """Fetch a single revision into a throwaway repo at tmp; True on success."""
     git("init", "-q", cwd=tmp)
     return git("fetch", "-q", "--depth=1", "--", url, revision, cwd=tmp).returncode == 0
+
+
+@contextmanager
+def _fetched(url: str, revision: str) -> Iterator[str]:
+    """A throwaway repo with `revision` of `url` at FETCH_HEAD."""
+    with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
+        if not _shallow_fetch(tmp, url, revision):
+            raise ResolveError(f"cannot fetch '{revision}' from {url}")
+        yield tmp
 
 
 def ls_remote(url: str, *patterns: str) -> dict[str, str]:
@@ -125,14 +136,14 @@ def fetch_blob(url: str, revision: str, path: str) -> str | None:
             raise ResolveError(f"{raw}: HTTP {e.code} {e.reason}")
         except urllib.error.URLError as e:
             raise ResolveError(f"{raw}: {e.reason}")
-    with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
-        if not _shallow_fetch(tmp, url, revision):
-            raise ResolveError(f"cannot fetch '{revision}' from {url}")
+    with _fetched(url, revision) as tmp:
         p = git("show", f"FETCH_HEAD:{path}", cwd=tmp)
         return p.stdout if p.returncode == 0 else None
 
 
-def list_dir(url: str, revision: str, path: str) -> list[str] | None:
+def list_dir(
+    url: str, revision: str, path: str, token: str | None = None
+) -> list[str] | None:
     """Entry names of a directory at a revision of a remote repo, without
     cloning it. None if path is not a directory there.
 
@@ -142,21 +153,15 @@ def list_dir(url: str, revision: str, path: str) -> list[str] | None:
         data = github_api(
             f"/repos/{gh[0]}/{gh[1]}/contents/{urllib.parse.quote(path)}"
             f"?ref={urllib.parse.quote(revision)}",
-            find_token(None),
+            token,
         )
         if not isinstance(data, list):  # a file (dict) or 404
             return None
         return [entry["name"] for entry in data if isinstance(entry, dict)]
-    with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
-        if not _shallow_fetch(tmp, url, revision):
-            raise ResolveError(f"cannot fetch '{revision}' from {url}")
-        if (
-            git("cat-file", "-t", f"FETCH_HEAD:{path}", cwd=tmp).stdout.strip()
-            != "tree"
-        ):
-            return None
+    with _fetched(url, revision) as tmp:
+        # ls-tree fails on a blob ("not a tree object") and on a missing path
         p = git("ls-tree", "--name-only", f"FETCH_HEAD:{path}", cwd=tmp)
-        return p.stdout.split()
+        return p.stdout.split() if p.returncode == 0 else None
 
 
 # --- GitHub API ---------------------------------------------------------
@@ -184,7 +189,7 @@ def find_token(cli_token: str | None) -> str | None:
     return None
 
 
-def github_api(path: str, token: str | None) -> Any:
+def github_api(path: str, token: str | None) -> dict | list | None:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -206,7 +211,7 @@ def github_api(path: str, token: str | None) -> Any:
 
 def latest_release(owner: str, repo: str, token: str | None) -> str | None:
     data = github_api(f"/repos/{owner}/{repo}/releases/latest", token)
-    return data.get("tag_name") if data else None
+    return data.get("tag_name") if isinstance(data, dict) else None
 
 
 def commit_exists(
@@ -233,6 +238,6 @@ def sha_on_ref(url: str, sha: str, ref: str, token: str | None) -> bool | None:
     cmp = github_api(
         f"/repos/{gh[0]}/{gh[1]}/compare/{urllib.parse.quote(ref)}...{sha}", token
     )
-    if cmp is None:
+    if not isinstance(cmp, dict):
         return None
     return cmp.get("status") in ("identical", "behind")

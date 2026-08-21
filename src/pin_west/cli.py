@@ -229,10 +229,13 @@ def _resolution_ok(
 
 
 def _regenerate_imports(
-    mf: ManifestFile, errors: list[str], scope: set[str] | None = None
+    mf: ManifestFile,
+    errors: list[str],
+    token: str | None,
+    scope: set[str] | None = None,
 ) -> ManifestFile:
     try:
-        return imports.regenerate(mf, errors, scope=scope)
+        return imports.regenerate(mf, errors, scope=scope, token=token)
     except (ManifestError, res.ResolveError) as e:
         errors.append(str(e))
         return mf
@@ -281,7 +284,7 @@ def cmd_pin(args) -> int:
         print(f"pin {p.name}: {ref} -> {resolved.sha[:12]} ({resolved.kind})")
 
     if args.include_imports or mf.has_generated_section:
-        mf = _regenerate_imports(mf, errors)
+        mf = _regenerate_imports(mf, errors, res.find_token(None))
     return _finish(mf, original, args, errors)
 
 
@@ -408,7 +411,7 @@ def cmd_bump(args) -> int:
             _apply(mf, p.name, ref, resolved.sha, resolved.kind)
 
     if mf.has_generated_section:
-        mf = _regenerate_imports(mf, errors, scope=selected or None)
+        mf = _regenerate_imports(mf, errors, token, scope=selected or None)
     return _finish(mf, original, args, errors)
 
 

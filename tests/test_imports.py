@@ -5,7 +5,6 @@ import shutil
 from textwrap import dedent
 
 import pytest
-from conftest import GitRemote
 
 from pin_west.cli import main
 from pin_west.manifest import GENERATED_BEGIN, GENERATED_END, ManifestFile
@@ -375,10 +374,10 @@ class TestIncludeImports:
         assert f"revision: {head}\n" in section
         assert "pin-west-self" not in text
 
-    def test_top_level_self_import_is_relative_to_repo_root(self, remote, tmp_path):
+    def test_top_level_self_import_is_relative_to_repo_root(self, remote):
         # like west: paths resolve against the manifest repository, not the
         # manifest file's directory
-        repo = GitRemote(tmp_path / "app")
+        repo = remote("app")
         dep = remote("dep")
         head = dep.commit("dep head")
         (repo.path / "submanifests").mkdir()

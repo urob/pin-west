@@ -77,7 +77,10 @@ def manifest_data(text: str) -> dict:
 
 
 def regenerate(
-    mf: ManifestFile, errors: list[str], scope: set[str] | None = None
+    mf: ManifestFile,
+    errors: list[str],
+    scope: set[str] | None = None,
+    token: str | None = None,
 ) -> ManifestFile:
     """Re-resolve the import tree and rebuild the managed section. Returns a
     new ManifestFile; `mf` is left untouched.
@@ -88,7 +91,7 @@ def regenerate(
     their winning declarer changed, detected via the recorded '# via'
     comment, or they are new. Without scope, everything is re-resolved."""
     base = mf.without_generated()
-    projects, info = _resolve_full(base.text(), mf.path)
+    projects, info = _resolve_full(base.text(), mf.path, token)
     indent = " " * base.item_indent
     old = {
         name: (mf.blocks[name].revision, mf.blocks[name].name_comment)
@@ -164,25 +167,33 @@ def _root_importer(name: str, info: _ImportInfo, direct: set[str]) -> str | None
         name = importer
 
 
-# Name of the synthetic project wrapping the top-level manifest when it has
-# a 'self: import:' of its own (see _resolve_full); never rendered.
+# Synthetic project wrapping the top-level manifest when it has a
+# 'self: import:' of its own (see _resolve_full); never rendered.
 _SELF = "pin-west-self"
+_SELF_WRAPPER = f"""\
+manifest:
+  projects:
+    - name: {_SELF}
+      url: {_SELF}
+      revision: {_SELF}
+      import: west.yml
+"""
 
 
-def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
+def _resolve_full(
+    text: str, manifest_path: Path, token: str | None
+) -> tuple[list, _ImportInfo]:
     """Resolve the full import tree of manifest `text` through west, with
     every imported file fetched at its pinned revision (no workspace, no
     clones). Self-imports are expanded by us (see _expand_self_imports):
     those of imported manifests from their remote, the top-level's from the
     manifest repository on disk."""
     info = _ImportInfo()
-    repo_root = _repo_root(manifest_path)
 
     def importer(project, path):
         if project.name == _SELF:
-            return _expand_self_imports(
-                text, "self", path, _LocalReader(repo_root), info, record=False
-            )
+            reader = _LocalReader(_repo_root(manifest_path))
+            return _expand_self_imports(text, "self", path, reader, info, record=False)
         declared = str(project.revision)
         revision = declared
         if not is_pinned(revision):
@@ -190,7 +201,7 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
             if sha is None:
                 raise res.ResolveError(f"cannot resolve '{revision}' on {project.url}")
             revision = sha
-        reader = _RemoteReader(project.url, revision)
+        reader = _RemoteReader(project.url, revision, token)
         try:
             content = reader.read(path)
         except res.ResolveError:
@@ -198,7 +209,7 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
                 raise
             # some hosts refuse fetching arbitrary shas; fall back to the
             # declared ref (reopens the snapshot race, but stays functional)
-            reader = _RemoteReader(project.url, declared)
+            reader = _RemoteReader(project.url, declared, token)
             content = reader.read(path)
         if content is None:
             raise res.ResolveError(
@@ -210,20 +221,7 @@ def _resolve_full(text: str, manifest_path: Path) -> tuple[list, _ImportInfo]:
     if (manifest_data(text).get("self") or {}).get("import") is not None:
         # west can only read a top-level self-import from a workspace; route
         # the manifest through the importer instead, where we expand it
-        data = yaml.safe_dump(
-            {
-                "manifest": {
-                    "projects": [
-                        {
-                            "name": _SELF,
-                            "url": _SELF,
-                            "revision": _SELF,
-                            "import": "west.yml",
-                        }
-                    ]
-                }
-            }
-        )
+        data = _SELF_WRAPPER
     try:
         manifest = Manifest.from_data(data, importer=importer)
     except (ManifestImportFailed, MalformedManifest) as e:
@@ -257,14 +255,14 @@ def _repo_root(manifest_path: Path) -> Path:
 class _RemoteReader:
     """Files of a remote repository at one revision."""
 
-    def __init__(self, url: str, revision: str):
-        self.url, self.revision = url, revision
+    def __init__(self, url: str, revision: str, token: str | None):
+        self.url, self.revision, self.token = url, revision, token
 
     def read(self, path: str) -> str | None:
         return res.fetch_blob(self.url, self.revision, path)
 
     def list_dir(self, path: str) -> list[str] | None:
-        return res.list_dir(self.url, self.revision, path)
+        return res.list_dir(self.url, self.revision, path, self.token)
 
 
 class _LocalReader:

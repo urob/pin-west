@@ -33,7 +33,7 @@ def _label(revision: str | None, comment: str | None) -> str:
         return f"`{comment}`"
     if revision is None:
         return "_(default)_"
-    return f"`{revision[:12]}`" if is_pinned(revision) else f"`{revision}`"
+    return f"`{revision[:12] if is_pinned(revision) else revision}`"
 
 
 def _range_link(url: str, old: str | None, new: str | None) -> str | None:
@@ -58,7 +58,7 @@ def summarize(old_path: Path, new_path: Path) -> str:
         old = old_mf.blocks.get(name)
         if old is None:
             via = f" ({new.comment})" if new.comment else ""
-            lines.append(f"- **{name}**: added at `{(new.revision or '?')[:12]}`{via}")
+            lines.append(f"- **{name}**: added at {_label(new.revision, None)}{via}")
             continue
         if old.revision == new.revision:
             continue
