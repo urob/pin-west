@@ -28,19 +28,22 @@ Zephyr/ZMK's west). Python 3.13, uv-managed. README.md documents the CLI.
   section. Managed entries carry only an inline `# via <declarer>` comment
   (parsed back for scoping — it is load-bearing there) and are excluded from
   bump's tracking logic; their revisions are the importing project's call.
-  `pin`/unselective `bump` refresh everything; `bump PROJECT` re-resolves
-  only entries rooting in the selection (winner-flip detection via the
-  `# via` comment forces re-resolution). Non-sha declarations are resolved
-  once per (url, ref) and cached so content fetch and pin share a snapshot.
-  In a workspace (manifest == the configured one), resolution runs via a
-  temp file + `Manifest.from_file` with `FORCE_PROJECTS`: self-imports come
-  from the filesystem/clones — gated on the clone's checkout matching the
-  pinned revision, else stripped loudly (a lock must never mix two
-  revisions of one project) — while project-import content always comes
-  from our importer at pinned revisions. `Manifest(source_data=…,
-  topdir=…)` is rejected by west — the temp-file route is the only way to
-  combine both. An empty managed section keeps its markers: the section's
-  presence is the regeneration opt-in.
+  `pin`/unselective `bump` refresh everything (floating declarations inside
+  imported manifests follow their ref — intended); `bump PROJECT`
+  re-resolves only entries rooting in the selection (winner-flip detection
+  via the `# via` comment forces re-resolution). Non-sha declarations are
+  resolved once per (url, ref) and cached so content fetch and pin share a
+  snapshot. `self: import:` is expanded by us, never by west (west reads
+  self-imports from the file system only): the importer strips it and
+  returns the self-imported files (fetched at the pinned sha; directories
+  via `list_dir`, `.yml` sorted) as trailing sibling documents — west's
+  importer accepts a list, imported in order, which reproduces its native
+  precedence. The top-level manifest's self-import goes through the same
+  path via a synthetic wrapper manifest (`_SELF`) whose importer reads the
+  manifest repo on disk. Never use `Manifest.from_file`/workspace state
+  here; clones are never consulted. Map-form self-imports (filters) are
+  warned about and dropped. An empty managed section keeps its markers:
+  the section's presence is the regeneration opt-in.
 - `action/summary.py` (outside the package) — renders the PR-body change
   overview for `action.yml` from the pre-/post-bump manifest; runs via
   `uv run --with pin-west` against the published package, so it must only

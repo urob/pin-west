@@ -143,12 +143,6 @@ tree of that project).
 Deleting the dependency section in the manifest turns off dependency locking
 (until re-enabled with `--include-imports`).
 
-**Submanifests:** Pinning dependencies introduced by `self: import:`
-requires running in an initialized workspace. Resolving an *imported*
-project's submanifests (e.g. zephyr's) further requires that project's
-clone to be checked out at its pin. Otherwise, submanifest dependencies
-remain unpinned until a `west update` + `pin-west pin` cycle locks them.
-
 ## GitHub Action
 
 The repository includes a Dependabot-like action for automated manifest

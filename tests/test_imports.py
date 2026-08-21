@@ -2,14 +2,14 @@
 imported (indirect) projects into the managed section."""
 
 import shutil
-import subprocess
 from textwrap import dedent
 
 import pytest
+from conftest import GitRemote
 
 from pin_west.cli import main
 from pin_west.manifest import GENERATED_BEGIN, GENERATED_END, ManifestFile
-from pin_west.resolve import fetch_blob
+from pin_west.resolve import fetch_blob, list_dir
 
 
 def sub_manifest(child, shadowed=None) -> str:
@@ -80,6 +80,14 @@ class TestFetchBlob:
     def test_missing_file(self, remote):
         repo = remote()
         assert fetch_blob(repo.url, repo.sha(), "nope.yml") is None
+
+    def test_list_dir(self, remote):
+        repo = remote()
+        repo.commit_file("d/b.yml", "b: 1\n")
+        sha = repo.commit_file("d/a.yml", "a: 1\n")
+        assert sorted(list_dir(repo.url, sha, "d") or []) == ["a.yml", "b.yml"]
+        assert list_dir(repo.url, sha, "d/a.yml") is None  # a file
+        assert list_dir(repo.url, sha, "nope") is None
 
 
 class TestIncludeImports:
@@ -257,13 +265,23 @@ class TestIncludeImports:
         # pinned at the head whose manifest content was read, not the new one
         assert f"revision: {head_before_push}\n" in path.read_text()
 
-    def test_imported_manifest_self_import_is_stripped(
+    def test_imported_manifest_self_import_resolves_from_remote(
         self, remote, write_manifest, capsys
     ):
-        # zephyr-style: the *imported* manifest has its own 'self: import:';
-        # it is dropped with a warning, everything else still materializes
+        # zephyr-style: the *imported* manifest self-imports a directory of
+        # submanifests; they are fetched at the pin and locked like the rest
         parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
         child_head = child.commit("child head")
+        dep_a, dep_b, dep_c = remote("dep_a"), remote("dep_b"), remote("dep_c")
+        heads = {
+            n: r.commit(f"{n} head")
+            for n, r in [("dep_a", dep_a), ("dep_b", dep_b), ("dep_c", dep_c)]
+        }
+        # b.yml sorts before c.yml: its 'dup' declaration must win
+        parent.commit_file("extras/c.yml", dep_manifest(dep_c, "dup"))
+        parent.commit_file("extras/b.yml", dep_manifest(dep_b, "dup"))
+        parent.commit_file("extras/a.yml", dep_manifest(dep_a, "dep_a"))
+        parent.commit_file("extras/README.md", "not a manifest\n")
         parent.commit_file(
             "sub/west.yml",
             sub_manifest(child) + "  self:\n    path: parent\n    import: extras\n",
@@ -271,18 +289,110 @@ class TestIncludeImports:
         path = write_manifest(top_manifest(parent, shadowed))
         assert main(["pin", "--include-imports", "-f", str(path)]) == 0
         out = capsys.readouterr().out
-        assert "'self: import: extras' cannot be resolved" in out
-        assert f"revision: {child_head}\n" in path.read_text()
+        assert "cannot be resolved" not in out
+        text = path.read_text()
+        section = text.split(GENERATED_BEGIN)[1]
+        assert f"revision: {child_head}\n" in section
+        assert "- name: dep_a # via parent (extras/a.yml)" in section
+        assert f"revision: {heads['dep_a']}\n" in section
+        assert "- name: dup # via parent (extras/b.yml)" in section
+        assert f"revision: {heads['dep_b']}\n" in section
+        assert heads["dep_c"] not in section
+        assert "3 added" in out
 
-    def test_self_import_fails_clearly(self, remote, write_manifest, capsys):
-        parent, shadowed = remote("parent"), remote("shadowed")
+    def test_nested_self_import_and_ordering(self, remote, write_manifest):
+        # the imported manifest's own projects beat its self-imports, and a
+        # self-imported file may self-import again
+        parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
+        child.commit("child head")
+        other, deep = remote("other"), remote("deep")
+        deep_head = deep.commit("deep head")
+        parent.commit_file(
+            "extras/more.yml",
+            dep_manifest(other, "child")  # loses against sub/west.yml's child
+            + "  self:\n    import: extras/deep.yml\n",
+        )
+        parent.commit_file("extras/deep.yml", dep_manifest(deep, "deep"))
+        parent.commit_file(
+            "sub/west.yml",
+            sub_manifest(child) + "  self:\n    import: [extras/more.yml]\n",
+        )
+        path = write_manifest(top_manifest(parent, shadowed))
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        section = path.read_text().split(GENERATED_BEGIN)[1]
+        assert f"url: {child.url}\n" in section
+        assert f"url: {other.url}\n" not in section
+        assert "- name: deep # via parent (extras/deep.yml)" in section
+        assert f"revision: {deep_head}\n" in section
+
+    def test_map_form_self_import_is_skipped_with_warning(
+        self, remote, write_manifest, capsys
+    ):
+        parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
+        child_head = child.commit("child head")
+        parent.commit_file("extras/more.yml", dep_manifest(remote("dep"), "dep"))
+        parent.commit_file(
+            "sub/west.yml",
+            sub_manifest(child) + "  self:\n    import:\n      file: extras/more.yml\n"
+            "      name-allowlist: [dep]\n",
+        )
+        path = write_manifest(top_manifest(parent, shadowed))
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        assert "uses the map form" in capsys.readouterr().out
+        text = path.read_text()
+        assert f"revision: {child_head}\n" in text
+        assert "- name: dep" not in text
+
+    def test_missing_self_import_fails(self, remote, write_manifest, capsys):
+        parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
+        child.commit("child head")
+        parent.commit_file(
+            "sub/west.yml",
+            sub_manifest(child) + "  self:\n    import: extras/nope.yml\n",
+        )
+        path = write_manifest(top_manifest(parent, shadowed))
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 1
+        assert "self-imported 'extras/nope.yml' not found" in capsys.readouterr().err
+
+    def test_top_level_self_import_without_workspace(
+        self, remote, write_manifest, tmp_path
+    ):
+        # read from disk next to the manifest; no workspace needed
+        parent, shadowed, dep = remote("parent"), remote("shadowed"), remote("dep")
+        parent.commit_file("sub/west.yml", "manifest:\n  projects: []\n")
+        head = dep.commit("dep head")
+        (tmp_path / "extra.yml").write_text(dep_manifest(dep, "dep"))
         path = write_manifest(
             top_manifest(parent, shadowed).replace(
                 "    path: config\n", "    path: config\n    import: extra.yml\n"
             )
         )
-        assert main(["pin", "--include-imports", "-f", str(path)]) == 1
-        assert "'self: import:'" in capsys.readouterr().err
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        text = path.read_text()
+        assert "import: extra.yml" in text  # the user's manifest is untouched
+        section = text.split(GENERATED_BEGIN)[1]
+        assert "- name: dep # via self (extra.yml)" in section
+        assert f"revision: {head}\n" in section
+        assert "pin-west-self" not in text
+
+    def test_top_level_self_import_is_relative_to_repo_root(self, remote, tmp_path):
+        # like west: paths resolve against the manifest repository, not the
+        # manifest file's directory
+        repo = GitRemote(tmp_path / "app")
+        dep = remote("dep")
+        head = dep.commit("dep head")
+        (repo.path / "submanifests").mkdir()
+        (repo.path / "submanifests" / "x.yml").write_text(dep_manifest(dep, "dep"))
+        (repo.path / "config").mkdir()
+        path = repo.path / "config" / "west.yml"
+        path.write_text(
+            dep_manifest(remote("direct"), "direct")
+            + "  self:\n    path: config\n    import: submanifests\n"
+        )
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        section = path.read_text().split(GENERATED_BEGIN)[1]
+        assert "- name: dep # via self (submanifests/x.yml)" in section
+        assert f"revision: {head}\n" in section
 
 
 @pytest.mark.skipif(shutil.which("west") is None, reason="west CLI not on PATH")
@@ -346,12 +456,12 @@ class TestWorkspaceSelfImports:
         assert "- name: dep2" in text.split(GENERATED_BEGIN)[1]
         assert f"revision: {head2}\n" in text
 
-    def test_bump_past_clone_never_mixes_snapshots(
+    def test_bump_past_clone_follows_remote(
         self, remote, west_workspace, monkeypatch, capsys
     ):
         # bump moves parent beyond the clone's checkout: its self-imported
-        # projects must be dropped loudly (not held from old content), and a
-        # `west update` + pin cycle re-locks them from the new revision
+        # projects are re-read from the remote at the new pin, never from
+        # the (stale) clone
         parent, child2, child3 = remote("parent"), remote("child2"), remote("child3")
         child2.commit("child2 head")
         head3 = child3.commit("child3 head")
@@ -382,15 +492,9 @@ class TestWorkspaceSelfImports:
         parent.commit_file("extras/more.yml", dep_manifest(child3, "dep3"), "swap")
         capsys.readouterr()
         assert main(["bump", "parent"]) == 0
-        out = capsys.readouterr().out
-        assert "cannot be resolved" in out  # dropped loudly, not held
+        assert "1 added, 1 removed" in capsys.readouterr().out
         text = (ws / "config" / "west.yml").read_text()
-        assert "dep2" not in text.split(GENERATED_BEGIN)[1]
-        assert "dep3" not in text
-
-        # heal: update the workspace, re-pin
-        subprocess.run(["west", "update"], cwd=ws, check=True, capture_output=True)
-        assert main(["pin"]) == 0
-        text = (ws / "config" / "west.yml").read_text()
-        assert "- name: dep3" in text.split(GENERATED_BEGIN)[1]
+        section = text.split(GENERATED_BEGIN)[1]
+        assert "dep2" not in section
+        assert "- name: dep3 # via parent (extras/more.yml)" in section
         assert f"revision: {head3}\n" in text
