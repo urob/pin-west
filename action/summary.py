@@ -57,15 +57,18 @@ def summarize(old_path: Path, new_path: Path) -> str:
         new = new_mf.blocks[name]
         old = old_mf.blocks.get(name)
         if old is None:
-            via = f" ({new.comment})" if new.comment else ""
-            lines.append(f"- **{name}**: added at {_label(new.revision, None)}{via}")
+            # managed entries carry their provenance on the name line
+            via = f" ({new.name_comment})" if new.name_comment else ""
+            label = _label(new.revision, new.comment)
+            lines.append(f"- **{name}**: added at {label}{via}")
             continue
         if old.revision == new.revision:
             continue
         change = (
             f"{_label(old.revision, old.comment)} → {_label(new.revision, new.comment)}"
         )
-        link = _range_link(urls[name], old.revision, new.revision)
+        url = urls.get(name)
+        link = _range_link(url, old.revision, new.revision) if url else None
         lines.append(f"- **{name}**: {change}" + (f" ({link})" if link else ""))
 
     for name in old_mf.blocks:

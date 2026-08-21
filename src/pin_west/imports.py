@@ -23,13 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
-from west.configuration import Configuration
+from west.configuration import Configuration, MalformedConfig
 from west.manifest import (
     MalformedManifest,
     Manifest,
     ManifestImportFailed,
     ManifestProject,
 )
+from west.util import WestNotFound, west_topdir
 
 from . import resolve as res
 from .manifest import ManifestError, ManifestFile, comment_ref, is_pinned
@@ -152,14 +153,16 @@ def _held_revision(
 
 def _root_importer(name: str, info: _ImportInfo, direct: set[str]) -> str | None:
     """Walk the winning-declaration chain up to the direct project it roots
-    in (e.g. cmsis -> zephyr -> zmk). None if the chain can't be traced."""
+    in (e.g. cmsis -> zephyr -> zmk), or _SELF_IMPORTER for entries declared
+    by the top-level manifest's own self-imports (never part of a bump
+    selection, so scoped runs hold them). None if the chain can't be traced."""
     seen = {name}
     while True:
         provenance = info.provenance.get(name)
         if provenance is None:
             return None
         importer = _provenance_importer(provenance)
-        if importer in direct:
+        if importer in direct or importer == _SELF_IMPORTER:
             return importer
         if importer in seen:
             return None
@@ -170,6 +173,9 @@ def _root_importer(name: str, info: _ImportInfo, direct: set[str]) -> str | None
 # Synthetic project wrapping the top-level manifest when it has a
 # 'self: import:' of its own (see _resolve_full); never rendered.
 _SELF = "pin-west-self"
+# Provenance importer name for projects declared in the top-level manifest's
+# own self-imported files ('# via self (<file>)').
+_SELF_IMPORTER = "self"
 _SELF_WRAPPER = f"""\
 manifest:
   projects:
@@ -192,8 +198,10 @@ def _resolve_full(
 
     def importer(project, path):
         if project.name == _SELF:
-            reader = _LocalReader(_repo_root(manifest_path))
-            return _expand_self_imports(text, "self", path, reader, info, record=False)
+            reader = _LocalReader(_manifest_repo(manifest_path))
+            return _expand_self_imports(
+                text, _SELF_IMPORTER, path, reader, info, record=False
+            )
         declared = str(project.revision)
         revision = declared
         if not is_pinned(revision):
@@ -201,7 +209,7 @@ def _resolve_full(
             if sha is None:
                 raise res.ResolveError(f"cannot resolve '{revision}' on {project.url}")
             revision = sha
-        reader = _RemoteReader(project.url, revision, token)
+        reader = res.RemoteTree(project.url, revision, token)
         try:
             content = reader.read(path)
         except res.ResolveError:
@@ -209,7 +217,7 @@ def _resolve_full(
                 raise
             # some hosts refuse fetching arbitrary shas; fall back to the
             # declared ref (reopens the snapshot race, but stays functional)
-            reader = _RemoteReader(project.url, declared, token)
+            reader = res.RemoteTree(project.url, declared, token)
             content = reader.read(path)
         if content is None:
             raise res.ResolveError(
@@ -226,6 +234,10 @@ def _resolve_full(
         manifest = Manifest.from_data(data, importer=importer)
     except (ManifestImportFailed, MalformedManifest) as e:
         raise ManifestError(f"import resolution failed: {e}")
+    except RecursionError:
+        raise ManifestError("import resolution failed: self-imports form a cycle")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ManifestError(f"import resolution failed: cannot read self-import: {e}")
     projects = [
         p
         for p in manifest.projects
@@ -244,25 +256,22 @@ def configured_manifest(topdir: str) -> Path | None:
     return Path(topdir, path, config.get("manifest.file") or "west.yml")
 
 
-def _repo_root(manifest_path: Path) -> Path:
-    """The manifest repository's root, which top-level self-import paths are
-    relative to: the enclosing git worktree, else the manifest's directory."""
-    parent = manifest_path.resolve().parent
-    p = res.git("rev-parse", "--show-toplevel", cwd=str(parent))
-    return Path(p.stdout.strip()) if p.returncode == 0 else parent
-
-
-class _RemoteReader:
-    """Files of a remote repository at one revision."""
-
-    def __init__(self, url: str, revision: str, token: str | None):
-        self.url, self.revision, self.token = url, revision, token
-
-    def read(self, path: str) -> str | None:
-        return res.fetch_blob(self.url, self.revision, path)
-
-    def list_dir(self, path: str) -> list[str] | None:
-        return res.list_dir(self.url, self.revision, path, self.token)
+def _manifest_repo(manifest_path: Path) -> Path:
+    """The manifest repository root, which top-level self-import paths are
+    relative to (west: topdir / manifest.path). Taken from the workspace
+    configuration when manifest_path is its configured manifest; otherwise
+    the manifest's directory, which is what `west init -l <dir>` configures."""
+    manifest_path = manifest_path.resolve()
+    try:
+        topdir = west_topdir(start=manifest_path.parent)
+        config = Configuration(topdir=topdir)
+        path = config.get("manifest.path")
+        file = config.get("manifest.file") or "west.yml"
+        if path is not None and (Path(topdir, path, file)).resolve() == manifest_path:
+            return Path(topdir, path).resolve()
+    except (WestNotFound, MalformedConfig):
+        pass
+    return manifest_path.parent
 
 
 class _LocalReader:
@@ -284,27 +293,28 @@ def _expand_self_imports(
     content: str,
     importer_name: str,
     path: str,
-    reader: _RemoteReader | _LocalReader,
+    reader: res.RemoteTree | _LocalReader,
     info: _ImportInfo,
     record: bool = True,
 ) -> list[str]:
     """The manifest `content` (read from `path` via `reader`) as the list of
-    manifest documents west should import for it: the content itself with
-    its 'self: import:' removed, followed by the self-imported files in
-    west's order (a directory imports its .yml files sorted by name), each
-    expanded recursively. West reads a manifest's self-imports from the
-    file system only; handing them back as trailing sibling documents
+    manifest documents west should import for it: the self-imported files
+    in west's order (a directory imports its .yml files sorted by name),
+    each expanded recursively, followed by the content itself with its
+    'self: import:' removed. West reads a manifest's self-imports from the
+    file system only, and loads them *before* the manifest's own projects
+    (first definition wins); handing them back as leading sibling documents
     yields the same projects at the same precedence."""
     manifest = manifest_data(content)
-    if record:
-        _record(info, importer_name, path, manifest)
     self_section = manifest.get("self") or {}
     imp = self_section.get("import")
     if imp is None:
+        if record:
+            _record(info, importer_name, path, manifest)
         return [content]
 
     paths = imp if isinstance(imp, list) else [imp]
-    files: list[str] = []
+    docs: list[str] = []
     for entry in paths:
         if not isinstance(entry, str):
             # the map form carries filters (name-allowlist, path-prefix, ...)
@@ -315,29 +325,37 @@ def _expand_self_imports(
                 "it defines are left unpinned"
             )
             continue
+        sub = reader.read(entry)
+        if sub is not None:
+            docs.extend(_expand_self_imports(sub, importer_name, entry, reader, info))
+            continue
+        # a directory imports its .yml files in name order
         names = reader.list_dir(entry)
-        if names is not None:
-            files.extend(
-                f"{entry}/{name}"
-                for name in sorted(names)
-                if name.endswith((".yml", ".yaml"))
+        if names is None:
+            raise res.ResolveError(
+                f"{importer_name} ({path}): self-imported '{entry}' not found"
             )
-        else:
-            files.append(entry)
+        for name in sorted(names):
+            if not name.endswith((".yml", ".yaml")):
+                continue
+            file = f"{entry}/{name}"
+            sub = reader.read(file)
+            if sub is None:
+                raise res.ResolveError(
+                    f"{importer_name} ({path}): self-imported '{file}' not found"
+                )
+            docs.extend(_expand_self_imports(sub, importer_name, file, reader, info))
 
+    # recorded after the self-imports, in west's load order: provenance
+    # goes to the first declaration
+    if record:
+        _record(info, importer_name, path, manifest)
     # rebuild rather than mutate: `manifest` is the shared parse _record read
     self_section = {k: v for k, v in self_section.items() if k != "import"}
     manifest = {k: v for k, v in manifest.items() if k != "self"}
     if self_section:
         manifest["self"] = self_section
-    docs = [yaml.safe_dump({"manifest": manifest})]
-    for file in files:
-        sub = reader.read(file)
-        if sub is None:
-            raise res.ResolveError(
-                f"{importer_name} ({path}): self-imported '{file}' not found"
-            )
-        docs.extend(_expand_self_imports(sub, importer_name, file, reader, info))
+    docs.append(yaml.safe_dump({"manifest": manifest}))
     return docs
 
 

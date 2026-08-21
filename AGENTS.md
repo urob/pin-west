@@ -36,12 +36,20 @@ Zephyr/ZMK's west). Python 3.13, uv-managed. README.md documents the CLI.
   snapshot. `self: import:` is expanded by us, never by west (west reads
   self-imports from the file system only): the importer strips it and
   returns the self-imported files (fetched at the pinned sha; directories
-  via `list_dir`, `.yml` sorted) as trailing sibling documents — west's
-  importer accepts a list, imported in order, which reproduces its native
-  precedence. The top-level manifest's self-import goes through the same
-  path via a synthetic wrapper manifest (`_SELF`) whose importer reads the
-  manifest repo on disk. Never use `Manifest.from_file`/workspace state
-  here; clones are never consulted. Map-form self-imports (filters) are
+  via `list_dir`, `.yml` sorted) as *leading* sibling documents — west's
+  importer accepts a list, imported in order, and west itself loads
+  self-imports before a manifest's own `projects:` (first definition
+  wins), so this reproduces its native precedence. The top-level
+  manifest's self-import goes through the same path via a synthetic
+  wrapper manifest (`_SELF`) whose importer reads the manifest repository
+  on disk — `topdir/manifest.path` when a workspace configures this
+  manifest, else the manifest's directory (what `west init -l <dir>`
+  gives); never the git toplevel. Entries it yields are `# via self
+  (<file>)` and root in no direct project: scoped bumps hold them. Never
+  use `Manifest.from_file`/workspace state here; clones are never
+  consulted. Remote files are read through `res.RemoteTree`, one shallow
+  fetch per (url, revision) for non-GitHub hosts. Map-form self-imports
+  (filters) are
   warned about and dropped. An empty managed section keeps its markers:
   the section's presence is the regeneration opt-in.
 - `action/summary.py` (outside the package) — renders the PR-body change

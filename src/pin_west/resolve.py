@@ -15,8 +15,6 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import NamedTuple
 
 _GITHUB_URL = re.compile(
@@ -52,13 +50,65 @@ def _shallow_fetch(tmp: str, url: str, revision: str) -> bool:
     return git("fetch", "-q", "--depth=1", "--", url, revision, cwd=tmp).returncode == 0
 
 
-@contextmanager
-def _fetched(url: str, revision: str) -> Iterator[str]:
-    """A throwaway repo with `revision` of `url` at FETCH_HEAD."""
-    with tempfile.TemporaryDirectory(prefix="pin-west-") as tmp:
-        if not _shallow_fetch(tmp, url, revision):
-            raise ResolveError(f"cannot fetch '{revision}' from {url}")
-        yield tmp
+class RemoteTree:
+    """Files of a remote repository at one revision, read without cloning.
+
+    GitHub remotes are served from raw.githubusercontent.com (one HTTPS GET
+    per file, no API rate limit) and the contents API (one call per
+    directory listing). Anything else is shallow-fetched once into a
+    throwaway repo that lives as long as this object, so reading N files
+    costs one fetch, not N."""
+
+    def __init__(self, url: str, revision: str, token: str | None = None):
+        self.url, self.revision, self.token = url, revision, token
+        self._gh = github_repo(url)
+        self._tmp: tempfile.TemporaryDirectory | None = None
+
+    def _repo(self) -> str:
+        if self._tmp is None:
+            tmp = tempfile.TemporaryDirectory(prefix="pin-west-")
+            if not _shallow_fetch(tmp.name, self.url, self.revision):
+                tmp.cleanup()
+                raise ResolveError(f"cannot fetch '{self.revision}' from {self.url}")
+            self._tmp = tmp
+        return self._tmp.name
+
+    def read(self, path: str) -> str | None:
+        """File content at path; None if it doesn't exist (or is a directory)."""
+        if self._gh:
+            raw = (
+                f"https://raw.githubusercontent.com/{self._gh[0]}/{self._gh[1]}/"
+                f"{urllib.parse.quote(self.revision)}/{urllib.parse.quote(path)}"
+            )
+            req = urllib.request.Request(raw, headers={"User-Agent": "pin-west"})
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.read().decode()
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                raise ResolveError(f"{raw}: HTTP {e.code} {e.reason}")
+            except urllib.error.URLError as e:
+                raise ResolveError(f"{raw}: {e.reason}")
+        # `cat-file blob` (unlike `show`) fails on a tree instead of listing it
+        p = git("cat-file", "blob", f"FETCH_HEAD:{path}", cwd=self._repo())
+        return p.stdout if p.returncode == 0 else None
+
+    def list_dir(self, path: str) -> list[str] | None:
+        """Entry names of the directory at path; None if not a directory."""
+        if self._gh:
+            data = github_api(
+                f"/repos/{self._gh[0]}/{self._gh[1]}/contents/"
+                f"{urllib.parse.quote(path)}?ref={urllib.parse.quote(self.revision)}",
+                self.token,
+            )
+            if not isinstance(data, list):  # a file (dict) or 404
+                return None
+            return [entry["name"] for entry in data if isinstance(entry, dict)]
+        # ls-tree fails on a blob ("not a tree object") and on a missing path;
+        # -z keeps names with spaces or quotes intact
+        p = git("ls-tree", "-z", "--name-only", f"FETCH_HEAD:{path}", cwd=self._repo())
+        return p.stdout.split("\0")[:-1] if p.returncode == 0 else None
 
 
 def ls_remote(url: str, *patterns: str) -> dict[str, str]:
@@ -117,51 +167,18 @@ def remote_refs(url: str) -> RemoteRefs:
 
 def fetch_blob(url: str, revision: str, path: str) -> str | None:
     """File content at a revision of a remote repo, without cloning it.
-
-    GitHub remotes are served straight from raw.githubusercontent.com (one
-    HTTPS GET, no API rate limit); anything else falls back to a shallow
-    fetch into a throwaway repo. Returns None if the file doesn't exist."""
-    if gh := github_repo(url):
-        raw = (
-            f"https://raw.githubusercontent.com/{gh[0]}/{gh[1]}/"
-            f"{urllib.parse.quote(revision)}/{urllib.parse.quote(path)}"
-        )
-        req = urllib.request.Request(raw, headers={"User-Agent": "pin-west"})
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return resp.read().decode()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return None
-            raise ResolveError(f"{raw}: HTTP {e.code} {e.reason}")
-        except urllib.error.URLError as e:
-            raise ResolveError(f"{raw}: {e.reason}")
-    with _fetched(url, revision) as tmp:
-        p = git("show", f"FETCH_HEAD:{path}", cwd=tmp)
-        return p.stdout if p.returncode == 0 else None
+    Returns None if the file doesn't exist. One-shot; use RemoteTree to
+    read several files at the same revision."""
+    return RemoteTree(url, revision).read(path)
 
 
 def list_dir(
     url: str, revision: str, path: str, token: str | None = None
 ) -> list[str] | None:
     """Entry names of a directory at a revision of a remote repo, without
-    cloning it. None if path is not a directory there.
-
-    GitHub remotes use the contents API (one call); anything else falls
-    back to a shallow fetch into a throwaway repo."""
-    if gh := github_repo(url):
-        data = github_api(
-            f"/repos/{gh[0]}/{gh[1]}/contents/{urllib.parse.quote(path)}"
-            f"?ref={urllib.parse.quote(revision)}",
-            token,
-        )
-        if not isinstance(data, list):  # a file (dict) or 404
-            return None
-        return [entry["name"] for entry in data if isinstance(entry, dict)]
-    with _fetched(url, revision) as tmp:
-        # ls-tree fails on a blob ("not a tree object") and on a missing path
-        p = git("ls-tree", "--name-only", f"FETCH_HEAD:{path}", cwd=tmp)
-        return p.stdout.split() if p.returncode == 0 else None
+    cloning it. None if path is not a directory there. One-shot; see
+    RemoteTree."""
+    return RemoteTree(url, revision, token).list_dir(path)
 
 
 # --- GitHub API ---------------------------------------------------------

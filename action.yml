@@ -107,10 +107,11 @@ runs:
         # Overview of the changes for the PR body, derived from the manifest
         # diff against HEAD (so it must run before committing). Best-effort:
         # a failure here must not block the pull request.
-        git show "HEAD:$MANIFEST" > "$RUNNER_TEMP/old-manifest.yml"
-        uv run --no-project --with pin-west "$GITHUB_ACTION_PATH/action/summary.py" \
-          "$RUNNER_TEMP/old-manifest.yml" "$MANIFEST" > "$RUNNER_TEMP/pin-west-summary.md" \
-          || echo "_(change overview unavailable; see the log below)_" \
+        {
+          git show "HEAD:$MANIFEST" > "$RUNNER_TEMP/old-manifest.yml" \
+            && uv run --no-project --with pin-west "$GITHUB_ACTION_PATH/action/summary.py" \
+              "$RUNNER_TEMP/old-manifest.yml" "$MANIFEST" > "$RUNNER_TEMP/pin-west-summary.md"
+        } || echo "_(change overview unavailable; see the log below)_" \
             > "$RUNNER_TEMP/pin-west-summary.md"
 
         git config user.name "github-actions[bot]"

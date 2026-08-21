@@ -80,11 +80,18 @@ class TestFetchBlob:
         repo = remote()
         assert fetch_blob(repo.url, repo.sha(), "nope.yml") is None
 
+    def test_directory_is_not_a_file(self, remote):
+        repo = remote()
+        sha = repo.commit_file("d/a.yml", "a: 1\n")
+        assert fetch_blob(repo.url, sha, "d") is None
+
     def test_list_dir(self, remote):
         repo = remote()
         repo.commit_file("d/b.yml", "b: 1\n")
         sha = repo.commit_file("d/a.yml", "a: 1\n")
         assert sorted(list_dir(repo.url, sha, "d") or []) == ["a.yml", "b.yml"]
+        sha = repo.commit_file("d/c d.yml", "c: 1\n")
+        assert "c d.yml" in (list_dir(repo.url, sha, "d") or [])
         assert list_dir(repo.url, sha, "d/a.yml") is None  # a file
         assert list_dir(repo.url, sha, "nope") is None
 
@@ -300,15 +307,16 @@ class TestIncludeImports:
         assert "3 added" in out
 
     def test_nested_self_import_and_ordering(self, remote, write_manifest):
-        # the imported manifest's own projects beat its self-imports, and a
-        # self-imported file may self-import again
+        # like west, self-imports load before the manifest's own projects
+        # (first definition wins), and a self-imported file may self-import
+        # again
         parent, child, shadowed = remote("parent"), remote("child"), remote("shadowed")
         child.commit("child head")
         other, deep = remote("other"), remote("deep")
         deep_head = deep.commit("deep head")
         parent.commit_file(
             "extras/more.yml",
-            dep_manifest(other, "child")  # loses against sub/west.yml's child
+            dep_manifest(other, "child")  # beats sub/west.yml's child
             + "  self:\n    import: extras/deep.yml\n",
         )
         parent.commit_file("extras/deep.yml", dep_manifest(deep, "deep"))
@@ -319,8 +327,9 @@ class TestIncludeImports:
         path = write_manifest(top_manifest(parent, shadowed))
         assert main(["pin", "--include-imports", "-f", str(path)]) == 0
         section = path.read_text().split(GENERATED_BEGIN)[1]
-        assert f"url: {child.url}\n" in section
-        assert f"url: {other.url}\n" not in section
+        assert "- name: child # via parent (extras/more.yml)" in section
+        assert f"url: {other.url}\n" in section
+        assert f"url: {child.url}\n" not in section
         assert "- name: deep # via parent (extras/deep.yml)" in section
         assert f"revision: {deep_head}\n" in section
 
@@ -374,15 +383,21 @@ class TestIncludeImports:
         assert f"revision: {head}\n" in section
         assert "pin-west-self" not in text
 
-    def test_top_level_self_import_is_relative_to_repo_root(self, remote):
-        # like west: paths resolve against the manifest repository, not the
-        # manifest file's directory
+    def test_top_level_self_import_is_relative_to_manifest_dir(self, remote):
+        # like west: paths resolve against the manifest repository, which
+        # `west init -l config` makes the manifest's directory, not the
+        # enclosing git repository's root
         repo = remote("app")
         dep = remote("dep")
         head = dep.commit("dep head")
+        (repo.path / "config" / "submanifests").mkdir(parents=True)
+        (repo.path / "config" / "submanifests" / "x.yml").write_text(
+            dep_manifest(dep, "dep")
+        )
         (repo.path / "submanifests").mkdir()
-        (repo.path / "submanifests" / "x.yml").write_text(dep_manifest(dep, "dep"))
-        (repo.path / "config").mkdir()
+        (repo.path / "submanifests" / "y.yml").write_text(
+            dep_manifest(remote("wrong"), "wrong")
+        )
         path = repo.path / "config" / "west.yml"
         path.write_text(
             dep_manifest(remote("direct"), "direct")
@@ -392,6 +407,72 @@ class TestIncludeImports:
         section = path.read_text().split(GENERATED_BEGIN)[1]
         assert "- name: dep # via self (submanifests/x.yml)" in section
         assert f"revision: {head}\n" in section
+        assert "wrong" not in section
+
+    def test_top_level_self_import_follows_workspace_config(
+        self, remote, tmp_path, monkeypatch
+    ):
+        # `west init -l . --mf config/west.yml`: manifest.path is the repo
+        # root, so self-imports resolve there even though the file is nested
+        dep = remote("dep")
+        head = dep.commit("dep head")
+        topdir = tmp_path / "ws"
+        (topdir / ".west").mkdir(parents=True)
+        (topdir / ".west" / "config").write_text(
+            "[manifest]\npath = app\nfile = config/west.yml\n"
+        )
+        (topdir / "app" / "config").mkdir(parents=True)
+        (topdir / "app" / "extra.yml").write_text(dep_manifest(dep, "dep"))
+        path = topdir / "app" / "config" / "west.yml"
+        path.write_text(
+            dep_manifest(remote("direct"), "direct")
+            + "  self:\n    import: extra.yml\n"
+        )
+        monkeypatch.chdir(topdir)
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        section = path.read_text().split(GENERATED_BEGIN)[1]
+        assert "- name: dep # via self (extra.yml)" in section
+        assert f"revision: {head}\n" in section
+
+    def test_scoped_bump_holds_self_imported_entries(
+        self, remote, write_manifest, tmp_path
+    ):
+        # entries declared by the user's own self-imports root in no direct
+        # project, so a selective bump of something else leaves them alone
+        parent, shadowed, dep = remote("parent"), remote("shadowed"), remote("dep")
+        parent.commit_file("sub/west.yml", "manifest:\n  projects: []\n")
+        old = dep.commit("dep old")
+        (tmp_path / "extra.yml").write_text(dep_manifest(dep, "dep"))
+        path = write_manifest(
+            top_manifest(parent, shadowed).replace(
+                "    path: config\n", "    path: config\n    import: extra.yml\n"
+            )
+        )
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 0
+        assert f"revision: {old}\n" in path.read_text()
+        new = dep.commit("dep new")
+        assert main(["bump", "parent", "-f", str(path)]) == 0
+        text = path.read_text()
+        assert f"revision: {old}\n" in text
+        assert new not in text
+        assert main(["bump", "-f", str(path)]) == 0
+        assert f"revision: {new}\n" in path.read_text()
+
+    def test_self_import_cycle_is_an_error(self, remote, write_manifest, tmp_path):
+        parent, shadowed = remote("parent"), remote("shadowed")
+        parent.commit_file("sub/west.yml", "manifest:\n  projects: []\n")
+        (tmp_path / "a.yml").write_text(
+            "manifest:\n  projects: []\n  self:\n    import: b.yml\n"
+        )
+        (tmp_path / "b.yml").write_text(
+            "manifest:\n  projects: []\n  self:\n    import: a.yml\n"
+        )
+        path = write_manifest(
+            top_manifest(parent, shadowed).replace(
+                "    path: config\n", "    path: config\n    import: a.yml\n"
+            )
+        )
+        assert main(["pin", "--include-imports", "-f", str(path)]) == 1
 
 
 @pytest.mark.skipif(shutil.which("west") is None, reason="west CLI not on PATH")

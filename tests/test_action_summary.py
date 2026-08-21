@@ -52,9 +52,9 @@ NEW = f"""manifest:
     - name: unchanged
       remote: zmkfirmware
       revision: {OLD_SHA}
-    - name: cmsis
+    - name: cmsis # via zephyr (west.yml)
       remote: zmkfirmware
-      revision: {IMP_SHA} # via zephyr
+      revision: {IMP_SHA}
 """
 
 
@@ -78,7 +78,7 @@ def test_non_github_remote_has_no_link(rendered: str) -> None:
 
 def test_unchanged_omitted_added_and_removed_listed(rendered: str) -> None:
     assert "unchanged" not in rendered
-    assert f"- **cmsis**: added at `{IMP_SHA[:12]}` (via zephyr)" in rendered
+    assert f"- **cmsis**: added at `{IMP_SHA[:12]}` (via zephyr (west.yml))" in rendered
     assert "- **gone**: removed" in rendered
 
 
