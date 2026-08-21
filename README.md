@@ -1,6 +1,8 @@
 # pin-west
 
-[![PyPI](https://img.shields.io/pypi/v/pin-west.svg)](https://pypi.org/project/pin-west/)
+[![image](https://img.shields.io/pypi/v/pin-west.svg)](https://pypi.org/project/pin-west/)
+[![image](https://img.shields.io/pypi/l/pin-west.svg)](https://github.com/urob/pin-west/blob/main/LICENSE)
+[![Actions status](https://github.com/urob/pin-west/actions/workflows/ci.yml/badge.svg)](https://github.com/urob/pin-west/actions/workflows/ci.yml)
 
 Pin and update revisions in [west
 manifests](https://docs.zephyrproject.org/latest/develop/west/manifest.html) to
