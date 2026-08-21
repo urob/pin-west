@@ -41,31 +41,18 @@ runs:
   steps:
     - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
-    - name: Check for updates
+    - name: Locate manifest
+      id: manifest
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.token }}
-        SCOPE: ${{ inputs.scope }}
         MANIFEST: ${{ inputs.manifest }}
       run: |
-        args=()
-        case "$SCOPE" in
-          latest) ;;
-          minor) args+=(--minor) ;;
-          patch) args+=(--patch) ;;
-          *)
-            echo "invalid scope '$SCOPE' (expected latest, minor, or patch)" >&2
-            exit 1
-            ;;
-        esac
         # A CI checkout is never an initialized west workspace, so pin-west's
-        # workspace fallback can't apply here; find the manifest ourselves.
-        if [ -z "$MANIFEST" ] && [ ! -f west.yml ]; then
+        # workspace fallback can't apply here; find the manifest ourselves
+        # and require a unique candidate.
+        if [ -z "$MANIFEST" ]; then
           mapfile -t found < <(git ls-files | grep -E '(^|/)west\.yml$' || true)
-          if [ "${#found[@]}" -eq 1 ]; then
-            MANIFEST="${found[0]}"
-            echo "using manifest: $MANIFEST"
-          else
+          if [ "${#found[@]}" -ne 1 ]; then
             {
               if [ "${#found[@]}" -eq 0 ]; then
                 echo "no west.yml found in the repository;"
@@ -77,11 +64,29 @@ runs:
             } >&2
             exit 1
           fi
+          MANIFEST="${found[0]}"
         fi
-        if [ -n "$MANIFEST" ]; then
-          args+=(--manifest "$MANIFEST")
-        fi
-        uvx pin-west bump "${args[@]}" | tee "$RUNNER_TEMP/pin-west-bump.log"
+        echo "using manifest: $MANIFEST"
+        echo "path=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+    - name: Check for updates
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.token }}
+        SCOPE: ${{ inputs.scope }}
+        MANIFEST: ${{ steps.manifest.outputs.path }}
+      run: |
+        case "$SCOPE" in
+          latest) args=() ;;
+          minor) args=(--minor) ;;
+          patch) args=(--patch) ;;
+          *)
+            echo "invalid scope '$SCOPE' (expected latest, minor, or patch)" >&2
+            exit 1
+            ;;
+        esac
+        uvx pin-west bump --manifest "$MANIFEST" "${args[@]}" \
+          | tee "$RUNNER_TEMP/pin-west-bump.log"
 
     - name: Open or update pull request
       id: pr
@@ -90,6 +95,7 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         BRANCH: ${{ inputs.pr-branch }}
         TITLE: ${{ inputs.pr-title }}
+        MANIFEST: ${{ steps.manifest.outputs.path }}
       run: |
         if git diff --quiet; then
           echo "updated=false" >> "$GITHUB_OUTPUT"
@@ -97,6 +103,15 @@ runs:
           echo "No changes to commit."
           exit 0
         fi
+
+        # Overview of the changes for the PR body, derived from the manifest
+        # diff against HEAD (so it must run before committing). Best-effort:
+        # a failure here must not block the pull request.
+        git show "HEAD:$MANIFEST" > "$RUNNER_TEMP/old-manifest.yml"
+        uv run --no-project --with pin-west "$GITHUB_ACTION_PATH/action/summary.py" \
+          "$RUNNER_TEMP/old-manifest.yml" "$MANIFEST" > "$RUNNER_TEMP/pin-west-summary.md" \
+          || echo "_(change overview unavailable; see the log below)_" \
+            > "$RUNNER_TEMP/pin-west-summary.md"
 
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -108,9 +123,14 @@ runs:
         {
           echo "Automated bump by [pin-west](https://github.com/urob/pin-west)."
           echo
+          cat "$RUNNER_TEMP/pin-west-summary.md"
+          echo
+          echo "<details><summary>pin-west bump log</summary>"
+          echo
           echo '```'
           cat "$RUNNER_TEMP/pin-west-bump.log"
           echo '```'
+          echo "</details>"
         } > "$body"
 
         url="$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')"

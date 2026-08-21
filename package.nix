@@ -25,6 +25,7 @@ buildPythonApplication {
       ./LICENSE # declared by pyproject's license-files; uv_build requires it
       ./src
       ./tests
+      ./action # tests/test_action_summary.py loads the PR-body renderer from here
     ];
   };
 

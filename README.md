@@ -178,11 +178,11 @@ jobs:
           scope: minor # optional: latest (default), minor, or patch
 ```
 
-The action automatically detects `west.yml`. Use `manifest: path/to/manifest.yml`
-to overwrite the detection. Use `scope` to narrow the update scope, `token` to 
-overwrite the default workflow token, and `pr-branch` and `pr-title` to control
-the pull request (`pr-branch` is force-pushed, so repeated runs update a single
-open PR).
+The action uses the repository's `west.yml` if there is exactly one; otherwise
+it fails and asks for `manifest: path/to/manifest.yml`, which overrides the
+detection. Use `scope` to narrow the update scope, `token` to overwrite the
+default workflow token, and `pr-branch` and `pr-title` to control the pull
+request (`pr-branch` is force-pushed, so repeated runs update a single open PR).
 
 Note that pull requests created with the default workflow token don't trigger
 other workflows; pass a PAT or a GitHub App token as `token` if CI should run

@@ -41,6 +41,10 @@ Zephyr/ZMK's west). Python 3.13, uv-managed. README.md documents the CLI.
   topdir=…)` is rejected by west — the temp-file route is the only way to
   combine both. An empty managed section keeps its markers: the section's
   presence is the regeneration opt-in.
+- `action/summary.py` (outside the package) — renders the PR-body change
+  overview for `action.yml` from the pre-/post-bump manifest; runs via
+  `uv run --with pin-west` against the published package, so it must only
+  use stable `pin_west` API. Tested in `tests/test_action_summary.py`.
 - `cli.py` — argparse subcommands `pin`, `bump`, `check`; manifest discovery;
   `--local` workspace mode.
 
