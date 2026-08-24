@@ -22,9 +22,9 @@ manifest:
 +      revision: bc114546392b4615ac90a99140eaf21dde31209d # main (2026-08-18)
 ```
 
-With a few noted exceptions, `pin-west` needs neither an
-initialized west workspace nor any clones. It ever only edits `revision` fields, 
-keeping all other formatting and comments byte-for-byte.
+`pin-west` operates directly on the west manifest and does **not** need an initialized
+west workspace. It keeps all formatting and commenting of the original manifest, modifying
+only `revision` fields.
 
 ## Setup
 
