@@ -26,6 +26,8 @@ jobs:
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
 
       # package.nix reads the version out of pyproject.toml, so a tag that
       # disagrees with it would ship two different versions of "0.1.0".
