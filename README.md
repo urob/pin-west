@@ -169,6 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: urob/pin-west@main
         with:
           scope: minor # optional: latest (default), minor, or patch
